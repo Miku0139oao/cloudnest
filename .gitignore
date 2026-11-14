@@ -7,3 +7,8 @@ frontend/node_modules
 .DS_Store
 .tmp-icons
 google-drive-parallel-upload.user.js
+
+google-drive-parallel-upload.*
+_research_tmp/
+_tools/
+
