@@ -246,6 +246,12 @@ func (s *Service) Quit() dto.Empty {
 	return dto.Empty{}
 }
 
+// DebugLog lets the frontend write a line to the application log.
+func (s *Service) DebugLog(msg string) dto.Empty {
+	s.log.Info("frontend: " + msg)
+	return dto.Empty{}
+}
+
 func (s *Service) window() (application.Window, bool) {
 	if s.app == nil {
 		return nil, false
@@ -421,14 +427,16 @@ func (s *Service) persistToken(ctx context.Context, provider, name, token string
 	if err != nil {
 		return err
 	}
+	params := map[string]any{"token": token}
 	if _, err := c.CreateRemote(ctx, rc.CreateRemoteIn{
-		Name: name,
-		Type: provider,
-		Parameters: map[string]any{
-			"token": token,
-		},
+		Name:       name,
+		Type:       provider,
+		Parameters: params,
 	}); err != nil {
-		return err
+		// Re-authenticating an existing remote: update it in place.
+		if _, updateErr := c.UpdateRemote(ctx, name, params, nil); updateErr != nil {
+			return err
+		}
 	}
 	_ = s.store.Update(func(cur *dto.Settings) { cur.Onboarded = true })
 	return nil
@@ -494,10 +502,11 @@ func (s *Service) ListCloud(accountID, path string) dto.Listing {
 	if fail != nil {
 		return dto.Listing{Path: path, Err: fail}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	remote := strings.Trim(path, "/")
 	started := time.Now()
+	s.log.Info("service: list cloud start", "account", accountID, "path", remote)
 	entries, err := c.List(ctx, accountID+":", remote, rc.ListOpt{})
 	if err != nil {
 		s.log.Warn("service: list cloud failed", "account", accountID, "path", remote, "err", err)

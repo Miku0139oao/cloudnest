@@ -341,6 +341,10 @@
           <span>{hasSplit ? t('files.restore') : t('files.download')}</span>
         </button>
         <span class="spacer"></span>
+        <button class="icon-button" aria-label={t('common.retry')} disabled={!account || data.cloudLoading}
+          onclick={() => account && refreshCloud(account.id, data.cloudPath, true)}>
+          <Icon name="refresh" size={20} />
+        </button>
         <button class="icon-button" aria-label={t('files.newFolder')} disabled={!account} onclick={() => (newFolderOpen = true)}>
           <Icon name="create-new-folder" size={20} />
         </button>
@@ -357,6 +361,9 @@
             {#each Array(7) as _, i (i)}
               <span class="skeleton" style={`height:14px;width:${72 - i * 4}%`}></span>
             {/each}
+            {#if data.cloudSlow}
+              <div class="hint" style="margin-top:6px">{t('files.slow')}</div>
+            {/if}
           </div>
         {:else if !account}
           <div class="empty" style="padding-top:72px">

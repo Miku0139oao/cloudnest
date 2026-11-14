@@ -1,10 +1,19 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import Icon from '$lib/components/Icon.svelte';
   import ProviderIcon from '$lib/components/ProviderIcon.svelte';
   import { app } from '$lib/state.svelte';
   import { t, fmtBytes, fmtTime } from '$lib/i18n';
   import { accountName } from '$lib/mock';
-  import { data } from '$lib/data.svelte';
+  import { data, refreshUsage } from '$lib/data.svelte';
+
+  onMount(() => {
+    // Quota is nice-to-have; never let it contend with a file listing.
+    const timer = setTimeout(() => {
+      if (!data.cloudLoading) refreshUsage();
+    }, 2500);
+    return () => clearTimeout(timer);
+  });
 
   const n = $derived(data.accounts.length);
 </script>

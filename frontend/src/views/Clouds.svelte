@@ -1,12 +1,18 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import Icon from '$lib/components/Icon.svelte';
   import ProviderIcon from '$lib/components/ProviderIcon.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import { app } from '$lib/state.svelte';
   import { t, fmtBytes, fmtTime } from '$lib/i18n';
   import { accountName, type Account } from '$lib/mock';
-  import { data, refreshAccounts } from '$lib/data.svelte';
+  import { data, refreshAccounts, refreshUsage } from '$lib/data.svelte';
   import { backend } from '$lib/backend';
+
+  onMount(() => {
+    const timer = setTimeout(() => refreshUsage(), 1500);
+    return () => clearTimeout(timer);
+  });
 
   let removeFor = $state<Account | null>(null);
   let removing = $state(false);

@@ -104,6 +104,7 @@ export const data = $state({
   cloudPath: '',
   activeAccount: '',
   cloudLoading: false,
+  cloudSlow: false,
   cloudError: '',
   localLoading: false
 });
@@ -156,23 +157,21 @@ export async function refreshAccounts(): Promise<void> {
   if (!data.activeAccount && data.accounts.length) {
     data.activeAccount = data.accounts[0].id;
   }
-  // Quota is fetched separately so the account list never waits on it.
-  refreshUsage();
 }
 
 export async function refreshUsage(): Promise<void> {
   const snapshot = data.accounts.slice();
-  await Promise.all(
-    snapshot.map(async (a) => {
-      const u = await backend.accountUsage(a.id);
-      if (!u || u.err || u.total <= 0) return;
-      const next = data.accounts.slice();
-      const idx = next.findIndex((x) => x.id === a.id);
-      if (idx < 0) return;
-      next[idx] = { ...next[idx], used: u.used, total: u.total };
-      data.accounts = next;
-    })
-  );
+  // Sequential: concurrent operations/about calls contend with file listings
+  // inside the rclone Drive backend.
+  for (const a of snapshot) {
+    const u = await backend.accountUsage(a.id);
+    if (!u || u.err || u.total <= 0) continue;
+    const next = data.accounts.slice();
+    const idx = next.findIndex((x) => x.id === a.id);
+    if (idx < 0) continue;
+    next[idx] = { ...next[idx], used: u.used, total: u.total };
+    data.accounts = next;
+  }
 }
 
 export async function refreshHistory(): Promise<void> {
@@ -194,11 +193,25 @@ export async function refreshHistory(): Promise<void> {
 }
 
 let cloudSeq = 0;
+const cloudCache = new Map<string, { entries: Entry[]; at: number }>();
 
-export async function refreshCloud(accountID: string, path: string): Promise<void> {
+export async function refreshCloud(accountID: string, path: string, force = false): Promise<void> {
+  const key = `${accountID}|${path}`;
+  const cached = cloudCache.get(key);
+  if (cached && !force && Date.now() - cached.at < 60_000) {
+    data.cloudFiles = cached.entries;
+    data.cloudPath = path;
+    data.cloudLoading = false;
+    data.cloudError = '';
+    return;
+  }
   const seq = ++cloudSeq;
   data.cloudLoading = true;
+  data.cloudSlow = false;
   data.cloudError = '';
+  const slowTimer = setTimeout(() => {
+    if (seq === cloudSeq) data.cloudSlow = true;
+  }, 4000);
   try {
     const res = await backend.listCloud(accountID, path);
     if (seq !== cloudSeq) return; // superseded by a newer request
@@ -212,10 +225,20 @@ export async function refreshCloud(accountID: string, path: string): Promise<voi
       data.cloudFiles = [];
       return;
     }
-    data.cloudFiles = (res.entries ?? []).map(mapEntry);
-    data.cloudPath = path;
+    try {
+      const mapped = (res.entries ?? []).map(mapEntry);
+      data.cloudFiles = mapped;
+      data.cloudPath = path;
+      cloudCache.set(key, { entries: mapped, at: Date.now() });
+    } catch (mapErr) {
+      data.cloudError = String(mapErr);
+    }
   } finally {
-    if (seq === cloudSeq) data.cloudLoading = false;
+    clearTimeout(slowTimer);
+    data.cloudSlow = false;
+    // Always clear the spinner. A newer request may still be running, but
+    // showing a stale list briefly beats an infinite skeleton.
+    data.cloudLoading = false;
   }
 }
 

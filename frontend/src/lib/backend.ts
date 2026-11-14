@@ -67,7 +67,8 @@ export const backend = {
   minimise: () => safe(() => Service.WindowMinimise()),
   toggleMaximise: () => safe(() => Service.WindowToggleMaximise()),
   close: () => safe(() => Service.WindowClose()),
-  quit: () => safe(() => Service.Quit())
+  quit: () => safe(() => Service.Quit()),
+  debug: (msg: string) => safe(() => Service.DebugLog(msg))
 };
 
 export type { DTO };
