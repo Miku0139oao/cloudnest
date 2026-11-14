@@ -17,16 +17,15 @@ jobs:
   portable:
     name: Build portable Windows release
     runs-on: windows-latest
+    # Serialize runs per ref: the nightly is deleted and recreated, so two
+    # overlapping runs would race for the same release.
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
     env:
-      # Optional Microsoft Trusted Signing; see the CI workflow. Without these
-      # secrets the release is published unsigned.
-      TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
-      TRUSTED_SIGNING_ACCOUNT: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
-      TRUSTED_SIGNING_PROFILE: ${{ secrets.TRUSTED_SIGNING_PROFILE }}
-      TRUSTED_SIGNING_CORRELATION_ID: ${{ secrets.TRUSTED_SIGNING_CORRELATION_ID }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      # Non-secret gate only; see the CI workflow. The credential itself is
+      # attached to the packaging step alone.
+      SIGNING_ENABLED: ${{ secrets.TRUSTED_SIGNING_ACCOUNT != '' }}
 
     steps:
       - name: Checkout
@@ -65,8 +64,13 @@ jobs:
         run: wails3 build
 
       - name: Set up code signing (optional)
-        if: env.TRUSTED_SIGNING_ACCOUNT != ''
+        if: env.SIGNING_ENABLED == 'true'
         shell: pwsh
+        env:
+          TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          TRUSTED_SIGNING_ACCOUNT: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
+          TRUSTED_SIGNING_PROFILE: ${{ secrets.TRUSTED_SIGNING_PROFILE }}
+          TRUSTED_SIGNING_CORRELATION_ID: ${{ secrets.TRUSTED_SIGNING_CORRELATION_ID }}
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/setup-trusted-signing.ps1 -OutDir "$env:RUNNER_TEMP\trusted-signing" -WriteGitHubEnv
 
       - name: Package portable ZIP
@@ -74,6 +78,10 @@ jobs:
         env:
           # A tag names the build; anything else is the rolling nightly.
           VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'nightly' }}
+          # Only this step signs, so only this step gets the Azure credential.
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -Version "$env:VERSION" -SkipBuild
 
       - name: Publish release
