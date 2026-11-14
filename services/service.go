@@ -89,6 +89,9 @@ func New(app *application.App, eng engine.Engine, store *settings.Store, rcloneP
 		usage:    make(map[string]usageEntry),
 	}
 	s.oauth = oauth.New(rclonePath, s.persistToken)
+	if logger != nil {
+		s.oauth.SetLogf(func(format string, args ...any) { logger.Info(fmt.Sprintf(format, args...)) })
+	}
 	return s
 }
 
@@ -343,18 +346,42 @@ func (s *Service) AccountUsage(id string) dto.Usage {
 	if used, total, ok := s.cachedUsage(id); ok {
 		return dto.Usage{Used: used, Total: total, Free: total - used}
 	}
-	c, fail := s.client()
-	if fail != nil {
-		return dto.Usage{Err: fail}
+
+	// Quota is decorative: a slow or throttled provider must not turn into a
+	// permanent "unavailable" label, so try the daemon twice, then a fresh
+	// rclone process, and finally fall back to whatever was measured before.
+	var lastErr error
+	if c, fail := s.client(); fail == nil {
+		for attempt := 0; attempt < 2; attempt++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			u, err := c.About(ctx, id+":")
+			cancel()
+			if err == nil && u.Total > 0 {
+				s.storeUsage(id, u.Used, u.Total, u.Free)
+				return dto.Usage{Used: u.Used, Total: u.Total, Free: u.Free}
+			}
+			if err != nil {
+				lastErr = err
+			} else {
+				lastErr = errors.New("cloud did not report a quota")
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	} else {
+		lastErr = errors.New(fail.Message)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	u, err := c.About(ctx, id+":")
-	if err != nil {
-		return dto.Usage{Err: failFrom(err)}
+
+	if used, total, free, err := s.aboutViaCLI(id); err == nil {
+		s.storeUsage(id, used, total, free)
+		return dto.Usage{Used: used, Total: total, Free: free}
+	} else if lastErr == nil {
+		lastErr = err
 	}
-	s.storeUsage(id, u.Used, u.Total, u.Free)
-	return dto.Usage{Used: u.Used, Total: u.Total, Free: u.Free}
+
+	if used, total, ok := s.staleUsage(id); ok {
+		return dto.Usage{Used: used, Total: total, Free: total - used}
+	}
+	return dto.Usage{Err: failFrom(lastErr)}
 }
 
 func (s *Service) cachedUsage(id string) (int64, int64, bool) {
@@ -362,6 +389,17 @@ func (s *Service) cachedUsage(id string) (int64, int64, bool) {
 	defer s.mu.Unlock()
 	u, ok := s.usage[id]
 	if !ok || time.Since(u.at) > 10*time.Minute {
+		return 0, 0, false
+	}
+	return u.used, u.total, true
+}
+
+// staleUsage returns the last successfully measured quota regardless of age.
+func (s *Service) staleUsage(id string) (int64, int64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.usage[id]
+	if !ok || u.total <= 0 {
 		return 0, 0, false
 	}
 	return u.used, u.total, true
@@ -416,14 +454,25 @@ func (s *Service) BeginConnect(provider, displayName string) dto.ConnectSession 
 		return dto.ConnectSession{Err: fail}
 	}
 	typ := rcloneType(provider)
-	if displayName == "" {
-		displayName = defaultRemoteName(provider)
+	displayName = strings.TrimSpace(displayName)
+	name := displayName
+	if name == "" {
+		name = s.uniqueRemoteName(defaultRemoteName(provider))
 	}
-	name := s.uniqueRemoteName(displayName)
+	// A non-empty displayName comes from "sign in again" and must keep its
+	// exact name; uniquifying it would add a second remote instead of
+	// refreshing the existing one.
 	id, err := s.oauth.Begin(typ, name)
 	if err != nil {
-		if errors.Is(err, oauth.ErrBusy) {
+		switch {
+		case errors.Is(err, oauth.ErrBusy):
 			return dto.ConnectSession{Err: &dto.Fail{Code: string(apperr.OAuthBusy), Message: "another sign-in is running"}}
+		case errors.Is(err, oauth.ErrPortBusy):
+			return dto.ConnectSession{Err: &dto.Fail{
+				Code:    string(apperr.OAuthPortBusy),
+				Message: "the sign-in port is busy",
+				Detail:  "Port 53682 is already in use, usually by an earlier sign-in that did not finish. Close any rclone windows and try again.",
+			}}
 		}
 		return dto.ConnectSession{Err: failFrom(err)}
 	}
@@ -460,19 +509,61 @@ func (s *Service) persistToken(ctx context.Context, provider, name, token string
 	if err != nil {
 		return err
 	}
+
 	params := map[string]any{"token": token}
+	if provider == "onedrive" {
+		extra, driveErr := onedriveDriveParams(ctx, token)
+		if driveErr != nil {
+			if s.log != nil {
+				s.log.Warn("onedrive: drive lookup failed", "err", driveErr)
+			}
+		} else {
+			for k, v := range extra {
+				params[k] = v
+			}
+		}
+	}
+
+	opt := &rc.ConfigOpt{NonInteractive: true}
 	if _, err := c.CreateRemote(ctx, rc.CreateRemoteIn{
 		Name:       name,
 		Type:       provider,
 		Parameters: params,
+		Opt:        opt,
 	}); err != nil {
 		// Re-authenticating an existing remote: update it in place.
-		if _, updateErr := c.UpdateRemote(ctx, name, params, nil); updateErr != nil {
-			return err
+		if _, updateErr := c.UpdateRemote(ctx, name, params, opt); updateErr != nil {
+			return friendlyConfigError(err)
 		}
 	}
+
+	// rclone stores whatever it is told, even a config that fails on first use.
+	// Check the remote once so a broken sign-in surfaces here instead of as an
+	// empty account card later.
+	checkCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	if _, aboutErr := c.About(checkCtx, name+":"); aboutErr != nil {
+		if _, listErr := c.List(checkCtx, name+":", "", rc.ListOpt{}); listErr != nil {
+			return friendlyConfigError(listErr)
+		}
+	}
+
 	_ = s.store.Update(func(cur *dto.Settings) { cur.Onboarded = true })
 	return nil
+}
+
+// friendlyConfigError turns rclone's raw config errors into something a user
+// can act on. The original text is kept as the wrapping message so the log
+// still carries the technical detail.
+func friendlyConfigError(err error) error {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "Auth state doesn't match"):
+		return fmt.Errorf("this sign-in page had already been used, so the provider rejected it — please sign in again: %w", err)
+	case strings.Contains(msg, "unable to get drive_id"):
+		return fmt.Errorf("Microsoft did not report which drive to use — please sign in again: %w", err)
+	}
+	return err
 }
 
 // ---------------------------------------------------------------- files

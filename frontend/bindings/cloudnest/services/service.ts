@@ -3,88 +3,64 @@
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
-import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Create } from "@wailsio/runtime";
+import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wailsio/runtime";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
 import * as dto$0 from "../internal/dto/models.js";
 
 export function AccountUsage(id: string): $CancellablePromise<dto$0.Usage> {
-    return $Call.ByID(4071873664, id).then(($result: any) => {
-        return $$createType0($result);
-    });
+    return $Call.ByID(4071873664, id);
 }
 
 export function ActiveJobs(): $CancellablePromise<dto$0.JobProgressList> {
-    return $Call.ByID(1463665948).then(($result: any) => {
-        return $$createType1($result);
-    });
+    return $Call.ByID(1463665948);
 }
 
 /**
  * ApplyBwLimit sets the rclone-wide bandwidth limit (e.g. "off", "1M").
  */
 export function ApplyBwLimit(rate: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(2516580956, rate).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(2516580956, rate);
 }
 
 export function BeginConnect(provider: string, displayName: string): $CancellablePromise<dto$0.ConnectSession> {
-    return $Call.ByID(3111808683, provider, displayName).then(($result: any) => {
-        return $$createType3($result);
-    });
+    return $Call.ByID(3111808683, provider, displayName);
 }
 
 export function Bootstrap(): $CancellablePromise<dto$0.Bootstrap> {
-    return $Call.ByID(394016632).then(($result: any) => {
-        return $$createType4($result);
-    });
+    return $Call.ByID(394016632);
 }
 
 export function CancelConnect(id: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(78268230, id).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(78268230, id);
 }
 
 export function CancelJob(id: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(2712195363, id).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(2712195363, id);
 }
 
 export function ChooseFiles(title: string): $CancellablePromise<dto$0.PathPick> {
-    return $Call.ByID(962161882, title).then(($result: any) => {
-        return $$createType5($result);
-    });
+    return $Call.ByID(962161882, title);
 }
 
 export function ChooseFolder(title: string): $CancellablePromise<dto$0.PathPick> {
-    return $Call.ByID(601793047, title).then(($result: any) => {
-        return $$createType5($result);
-    });
+    return $Call.ByID(601793047, title);
 }
 
 export function ConnectState(id: string): $CancellablePromise<dto$0.ConnectProgress> {
-    return $Call.ByID(1417510581, id).then(($result: any) => {
-        return $$createType6($result);
-    });
+    return $Call.ByID(1417510581, id);
 }
 
 export function CreateFolder(accountID: string, path: string, name: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(3670060422, accountID, path, name).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(3670060422, accountID, path, name);
 }
 
 /**
  * DebugLog lets the frontend write a line to the application log.
  */
 export function DebugLog(msg: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(553510257, msg).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(553510257, msg);
 }
 
 /**
@@ -94,10 +70,8 @@ export function DebugLog(msg: string): $CancellablePromise<dto$0.Empty> {
  * a folder purge. Paths are relative to the account prefix, and values which
  * could escape it (a remote separator or "..") are rejected.
  */
-export function DeleteCloud(accountID: string, paths: string[]): $CancellablePromise<dto$0.DeleteResult> {
-    return $Call.ByID(1348662406, accountID, paths).then(($result: any) => {
-        return $$createType7($result);
-    });
+export function DeleteCloud(accountID: string, paths: string[] | null): $CancellablePromise<dto$0.DeleteResult> {
+    return $Call.ByID(1348662406, accountID, paths);
 }
 
 /**
@@ -105,28 +79,20 @@ export function DeleteCloud(accountID: string, paths: string[]): $CancellablePro
  * written to localDir/<basename>; a single file lands at localDir/<basename>.
  * The destination directory is created before any job starts.
  */
-export function Download(accountID: string, remotePaths: string[], localDir: string): $CancellablePromise<dto$0.JobRef> {
-    return $Call.ByID(1600904658, accountID, remotePaths, localDir).then(($result: any) => {
-        return $$createType8($result);
-    });
+export function Download(accountID: string, remotePaths: string[] | null, localDir: string): $CancellablePromise<dto$0.JobRef> {
+    return $Call.ByID(1600904658, accountID, remotePaths, localDir);
 }
 
 export function EngineStatus(): $CancellablePromise<dto$0.EngineStatus> {
-    return $Call.ByID(2901941338).then(($result: any) => {
-        return $$createType9($result);
-    });
+    return $Call.ByID(2901941338);
 }
 
 export function GetSettings(): $CancellablePromise<dto$0.Settings> {
-    return $Call.ByID(2035491227).then(($result: any) => {
-        return $$createType10($result);
-    });
+    return $Call.ByID(2035491227);
 }
 
 export function History(limit: number): $CancellablePromise<dto$0.RecordList> {
-    return $Call.ByID(1721703842, limit).then(($result: any) => {
-        return $$createType11($result);
-    });
+    return $Call.ByID(1721703842, limit);
 }
 
 /**
@@ -136,45 +102,31 @@ export function History(limit: number): $CancellablePromise<dto$0.RecordList> {
  * format). It never hashes part contents; sizes are compared to the manifest.
  */
 export function InspectSplit(accountID: string, partsPath: string): $CancellablePromise<dto$0.SplitInfo> {
-    return $Call.ByID(3748383902, accountID, partsPath).then(($result: any) => {
-        return $$createType12($result);
-    });
+    return $Call.ByID(3748383902, accountID, partsPath);
 }
 
 export function ListAccounts(): $CancellablePromise<dto$0.AccountList> {
-    return $Call.ByID(4129981430).then(($result: any) => {
-        return $$createType13($result);
-    });
+    return $Call.ByID(4129981430);
 }
 
 export function ListCloud(accountID: string, path: string): $CancellablePromise<dto$0.Listing> {
-    return $Call.ByID(3347746235, accountID, path).then(($result: any) => {
-        return $$createType14($result);
-    });
+    return $Call.ByID(3347746235, accountID, path);
 }
 
 export function ListLocal(path: string): $CancellablePromise<dto$0.Listing> {
-    return $Call.ByID(2828707269, path).then(($result: any) => {
-        return $$createType14($result);
-    });
+    return $Call.ByID(2828707269, path);
 }
 
 export function ListProviders(): $CancellablePromise<dto$0.ProviderCatalog> {
-    return $Call.ByID(2503888824).then(($result: any) => {
-        return $$createType15($result);
-    });
+    return $Call.ByID(2503888824);
 }
 
 export function ListRoots(): $CancellablePromise<dto$0.RootList> {
-    return $Call.ByID(3488537723).then(($result: any) => {
-        return $$createType16($result);
-    });
+    return $Call.ByID(3488537723);
 }
 
 export function MarkOnboarded(): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(2289508303).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(2289508303);
 }
 
 /**
@@ -182,33 +134,23 @@ export function MarkOnboarded(): $CancellablePromise<dto$0.Empty> {
  * bounded so a huge tree cannot freeze the UI.
  */
 export function Measure(path: string): $CancellablePromise<dto$0.Measure> {
-    return $Call.ByID(2446567518, path).then(($result: any) => {
-        return $$createType17($result);
-    });
+    return $Call.ByID(2446567518, path);
 }
 
 export function OpenConfigFolder(): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(3028414960).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(3028414960);
 }
 
 export function OpenExternal(url: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(3316962113, url).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(3316962113, url);
 }
 
 export function OpenLogFolder(): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(2791883780).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(2791883780);
 }
 
 export function PauseJob(id: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(3384871207, id).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(3384871207, id);
 }
 
 /**
@@ -216,27 +158,19 @@ export function PauseJob(id: string): $CancellablePromise<dto$0.Empty> {
  * would be deleted. It never mutates anything.
  */
 export function Plan(req: dto$0.PlanRequest): $CancellablePromise<dto$0.PlanResult> {
-    return $Call.ByID(1729196425, req).then(($result: any) => {
-        return $$createType18($result);
-    });
+    return $Call.ByID(1729196425, req);
 }
 
 export function Quit(): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(454600297).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(454600297);
 }
 
 export function RemoveAccount(id: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(1579347961, id).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(1579347961, id);
 }
 
 export function RestartEngine(): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(1243231131).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(1243231131);
 }
 
 /**
@@ -245,9 +179,7 @@ export function RestartEngine(): $CancellablePromise<dto$0.Empty> {
  * Activity.
  */
 export function RestoreSplit(accountID: string, partsPath: string, destDir: string): $CancellablePromise<dto$0.JobRef> {
-    return $Call.ByID(3160178232, accountID, partsPath, destDir).then(($result: any) => {
-        return $$createType8($result);
-    });
+    return $Call.ByID(3160178232, accountID, partsPath, destDir);
 }
 
 /**
@@ -256,33 +188,23 @@ export function RestoreSplit(accountID: string, partsPath: string, destDir: stri
  * already been stopped and sync/copy skips files which are already present.
  */
 export function ResumeJob(id: string): $CancellablePromise<dto$0.JobRef> {
-    return $Call.ByID(4018894324, id).then(($result: any) => {
-        return $$createType8($result);
-    });
+    return $Call.ByID(4018894324, id);
 }
 
 export function SaveSettings($in: dto$0.Settings): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(3824942466, $in).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(3824942466, $in);
 }
 
 export function SetLanguage(lang: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(3006632000, lang).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(3006632000, lang);
 }
 
 export function SetTheme(theme: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(2154786723, theme).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(2154786723, theme);
 }
 
 export function StartBackup(req: dto$0.PlanRequest): $CancellablePromise<dto$0.JobRef> {
-    return $Call.ByID(2542103276, req).then(($result: any) => {
-        return $$createType8($result);
-    });
+    return $Call.ByID(2542103276, req);
 }
 
 /**
@@ -290,47 +212,18 @@ export function StartBackup(req: dto$0.PlanRequest): $CancellablePromise<dto$0.J
  * under destPath/<basename>; a single file is placed directly in destPath.
  * All jobs share a group and are registered as one upload job.
  */
-export function Upload(accountID: string, destPath: string, localPaths: string[]): $CancellablePromise<dto$0.JobRef> {
-    return $Call.ByID(4002902455, accountID, destPath, localPaths).then(($result: any) => {
-        return $$createType8($result);
-    });
+export function Upload(accountID: string, destPath: string, localPaths: string[] | null): $CancellablePromise<dto$0.JobRef> {
+    return $Call.ByID(4002902455, accountID, destPath, localPaths);
 }
 
 export function WindowClose(): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(2266239674).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(2266239674);
 }
 
 export function WindowMinimise(): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(4069587571).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(4069587571);
 }
 
 export function WindowToggleMaximise(): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(3899068209).then(($result: any) => {
-        return $$createType2($result);
-    });
+    return $Call.ByID(3899068209);
 }
-
-// Private type creation functions
-const $$createType0 = dto$0.Usage.createFrom;
-const $$createType1 = dto$0.JobProgressList.createFrom;
-const $$createType2 = dto$0.Empty.createFrom;
-const $$createType3 = dto$0.ConnectSession.createFrom;
-const $$createType4 = dto$0.Bootstrap.createFrom;
-const $$createType5 = dto$0.PathPick.createFrom;
-const $$createType6 = dto$0.ConnectProgress.createFrom;
-const $$createType7 = dto$0.DeleteResult.createFrom;
-const $$createType8 = dto$0.JobRef.createFrom;
-const $$createType9 = dto$0.EngineStatus.createFrom;
-const $$createType10 = dto$0.Settings.createFrom;
-const $$createType11 = dto$0.RecordList.createFrom;
-const $$createType12 = dto$0.SplitInfo.createFrom;
-const $$createType13 = dto$0.AccountList.createFrom;
-const $$createType14 = dto$0.Listing.createFrom;
-const $$createType15 = dto$0.ProviderCatalog.createFrom;
-const $$createType16 = dto$0.RootList.createFrom;
-const $$createType17 = dto$0.Measure.createFrom;
-const $$createType18 = dto$0.PlanResult.createFrom;
