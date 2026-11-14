@@ -438,3 +438,123 @@ func randomID(n int) string {
 	}
 	return base64.RawURLEncoding.EncodeToString(buf)
 }
+
+// MoveFile renames or moves one object with operations/movefile.
+func (c *Client) MoveFile(ctx context.Context, in CopyFileIn) error {
+	for name, value := range map[string]string{
+		"srcFs": in.SrcFs, "srcRemote": in.SrcRemote,
+		"dstFs": in.DstFs, "dstRemote": in.DstRemote,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("rc: MoveFile: %s is required", name)
+		}
+	}
+	return c.Call(ctx, "operations/movefile", copyFileRequest{
+		SrcFs: in.SrcFs, SrcRemote: in.SrcRemote,
+		DstFs: in.DstFs, DstRemote: in.DstRemote,
+	}, nil)
+}
+
+// HashSumFile returns the hash of one object. hashType is an rclone hash name
+// such as "sha256" or "md5".
+func (c *Client) HashSumFile(ctx context.Context, fs, remote, hashType string) (string, error) {
+	if strings.TrimSpace(fs) == "" || strings.TrimSpace(remote) == "" {
+		return "", errors.New("rc: HashSumFile: fs and remote are required")
+	}
+	var out struct {
+		Hash     string `json:"hash"`
+		HashType string `json:"hashType"`
+	}
+	req := map[string]string{"fs": fs, "remote": remote, "hashType": hashType}
+	if err := c.Call(ctx, "operations/hashsumfile", req, &out); err != nil {
+		return "", err
+	}
+	return out.Hash, nil
+}
+
+// PublicLink asks the backend for a share link to one object.
+func (c *Client) PublicLink(ctx context.Context, fs, remote string) (string, error) {
+	if strings.TrimSpace(fs) == "" || strings.TrimSpace(remote) == "" {
+		return "", errors.New("rc: PublicLink: fs and remote are required")
+	}
+	var out struct {
+		URL string `json:"url"`
+	}
+	if err := c.Call(ctx, "operations/publiclink", map[string]string{"fs": fs, "remote": remote}, &out); err != nil {
+		return "", err
+	}
+	return out.URL, nil
+}
+
+// Cleanup empties the trash of the remote (or of one directory).
+func (c *Client) Cleanup(ctx context.Context, fs, dir string) error {
+	req := map[string]string{"fs": fs}
+	if dir != "" {
+		req["dir"] = dir
+	}
+	return c.Call(ctx, "operations/cleanup", req, nil)
+}
+
+// CheckResult mirrors the operations/check reply.
+type CheckResult struct {
+	Differ       []string `json:"differ"`
+	MissingOnSrc []string `json:"missingOnSrc"`
+	MissingOnDst []string `json:"missingOnDst"`
+	Error        []string `json:"error"`
+	HashType     string   `json:"hashType"`
+	Status       string   `json:"status"`
+	Success      bool     `json:"success"`
+}
+
+// Check compares two locations synchronously and returns the differences.
+func (c *Client) Check(ctx context.Context, srcFs, dstFs string) (*CheckResult, error) {
+	if strings.TrimSpace(srcFs) == "" || strings.TrimSpace(dstFs) == "" {
+		return nil, errors.New("rc: Check: srcFs and dstFs are required")
+	}
+	var out CheckResult
+	if err := c.Call(ctx, "operations/check",
+		map[string]string{"srcFs": srcFs, "dstFs": dstFs}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Mount mounts one remote at a Windows drive letter (requires WinFsp).
+func (c *Client) Mount(ctx context.Context, fs, mountPoint string) error {
+	if strings.TrimSpace(fs) == "" || strings.TrimSpace(mountPoint) == "" {
+		return errors.New("rc: Mount: fs and mountPoint are required")
+	}
+	req := map[string]any{
+		"fs":         fs,
+		"mountPoint": mountPoint,
+		"mountOpt":   map[string]any{"ReadOnly": false},
+		"vfsOpt":     map[string]any{"CacheMode": 3},
+	}
+	return c.Call(ctx, "mount/mount", req, nil)
+}
+
+// Unmount removes one active mount.
+func (c *Client) Unmount(ctx context.Context, mountPoint string) error {
+	if strings.TrimSpace(mountPoint) == "" {
+		return errors.New("rc: Unmount: mountPoint is required")
+	}
+	return c.Call(ctx, "mount/unmount", map[string]string{"mountPoint": mountPoint}, nil)
+}
+
+// MountInfo is one entry of mount/listmounts.
+type MountInfo struct {
+	Fs         string `json:"Fs"`
+	MountPoint string `json:"MountPoint"`
+	MountedOn  string `json:"MountedOn"`
+}
+
+// ListMounts returns the active mounts.
+func (c *Client) ListMounts(ctx context.Context) ([]MountInfo, error) {
+	var out struct {
+		MountPoints []MountInfo `json:"mountPoints"`
+	}
+	if err := c.Call(ctx, "mount/listmounts", struct{}{}, &out); err != nil {
+		return nil, err
+	}
+	return out.MountPoints, nil
+}
