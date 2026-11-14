@@ -20,16 +20,16 @@ rclone 很強，但對一般使用者來說是命令列、設定檔與參數。C
 
 ## 目前狀態
 
-早期開發中。已可運作：
+已可運作：
 
-- 讀取真實的 rclone remotes、Google Drive 容量
-- 本機資料夾瀏覽（含 KnownFolder 重新導向，例如 OneDrive）
-- 雲端資料夾瀏覽（`operations/list`）
-- 新增雲端帳號：`rclone authorize` → 系統瀏覽器 → 自動寫入設定
-- 移除雲端帳號（只移除設定，不動雲端檔案）
-- 備份：`sync/copy`，即時進度（`core/stats`）
+- **帳號**：讀取既有 rclone remotes、容量（Drive 限流時自動重試與 CLI 備援）、瀏覽器授權新增、重新授權（保留原本名稱）、移除（只動設定）
+- **瀏覽**：本機（含 KnownFolder）與雲端雙欄、目前資料夾搜尋、整個雲端遞迴搜尋
+- **檔案操作**：上傳／下載（單檔與資料夾）、拖放上傳、重新命名、移動、複製到其他雲端帳號、新增資料夾、刪除、清空垃圾桶
+- **備份**：`sync/copy`、鏡像模式（刪除預覽＋勾選確認）、排除規則、自動重試、限速、大檔案切片加速與還原
+- **進度**：即時速度／剩餘時間、暫停／續傳／取消、歷史紀錄（重啟後保留）、中斷後一鍵續傳
+- **其他**：分享連結、檔案雜湊（SHA-256／MD5）、備份驗證（`rclone check`）、每日排程備份、掛載成磁碟機（需 WinFsp）、中英切換、明暗主題、視窗尺寸記憶
 
-施工中：切片上傳／還原（`internal/split` 已完成並有測試）、鏡像模式 preflight、續傳 journal、系統匣。
+尚未包含：系統匣、程式碼簽章（SmartScreen 會警告）、多螢幕混合 DPI 的實機驗證。
 
 ## 螢幕截圖
 
@@ -75,7 +75,7 @@ npm run dev
 
 ```
 main.go                 Wails 入口、視窗、服務註冊
-services/              唯一 Wails 綁定層（34 個方法）
+services/              唯一 Wails 綁定層（前端只能透過這裡呼叫 rclone）
 internal/
   engine/              rclone rcd 生命週期（隨機埠、Basic auth、Job Object 防孤兒）
   rc/                  rclone RC HTTP client
@@ -83,11 +83,13 @@ internal/
   files/               本機檔案 + Windows KnownFolder
   split/               切片／還原／manifest（含測試）
   settings/            portable settings.json
-  platform/            portable 路徑、開瀏覽器、磁碟空間
+  platform/            portable 路徑、開瀏覽器、磁碟空間、WinFsp 偵測
   dto/ apperr/         前端 wire types、錯誤分類
 frontend/              Svelte 5 + Vite
 preview/               靜態 UI 預覽 + 截圖
 ```
+
+歷史紀錄存在 `data\history.json`，與 `settings.json`、`rclone.conf`、`logs\`、`staging\` 放在一起；整個資料夾刪掉就等於清除所有設定。
 
 ## 設計原則
 
