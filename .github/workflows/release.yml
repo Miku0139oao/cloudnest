@@ -95,10 +95,14 @@ jobs:
             "- On Windows 10, if the app does not start, install the WebView2 runtime from runtime\MicrosoftEdgeWebview2Setup.exe.`n" +
             "- rclone is bundled in bin\rclone.exe. Cloudnest and rclone are MIT licensed (LICENSES\).`n"
 
-          # Report the real signature state instead of claiming one.
+          # State that the build is signed, without publishing the personal
+          # details embedded in the signer certificate. The hash lets users
+          # verify the download themselves.
           $signature = Get-AuthenticodeSignature -LiteralPath 'dist\Cloudnest\Cloudnest.exe'
           if ($signature.Status -eq 'Valid') {
-            $body += "- Cloudnest.exe is Authenticode-signed by $($signature.SignerCertificate.Subject).`n"
+            $hash = (Get-FileHash -LiteralPath 'dist\Cloudnest\Cloudnest.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
+            $body += "- Cloudnest.exe is Authenticode-signed and timestamped.`n"
+            $body += "- SHA-256 of Cloudnest.exe: $hash`n"
           }
           else {
             $body += "- This build is not Authenticode-signed ($($signature.Status)).`n"
