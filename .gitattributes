@@ -25,3 +25,6 @@ go.sum text eol=lf
 *.icns binary
 *.jar binary
 *.exe binary
+LICENSE text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
