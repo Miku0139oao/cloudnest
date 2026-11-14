@@ -72,7 +72,7 @@ pwsh scripts/package-portable.ps1 -Version 0.1.0
 # dist/Cloudnest-0.1.0-win64.zip
 ```
 
-### 程式碼簽章（Microsoft Trusted Signing）
+### 程式碼簽章（Microsoft Trusted Signing / Artifact Signing）
 
 `Cloudnest.exe` 在打包時會用 Authenticode 簽署，這樣 Windows 才會顯示可辨識的發行者。簽章步驟是選用的：工具不存在時只警告、照樣產出未簽章的 ZIP。
 
@@ -97,6 +97,10 @@ CI／Release 要在 GitHub Actions 上簽章時，設定這些 repository secret
 | `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` | 服務主體憑證 |
 
 只要 `TRUSTED_SIGNING_ACCOUNT` 沒有設定，工作流程就跳過簽章，維持原本的未簽章產物。
+
+這個 repo 已經設定好上述 secrets，所以 CI 與 Release 產出的 ZIP 都是已簽章的；發佈說明會列出實際的簽署者。服務主體需要的是 Code Signing 帳戶上的 **Artifact Signing Certificate Profile Signer**（舊稱 Trusted Signing Certificate Profile Signer）角色，而且角色指派要幾分鐘才會生效。
+
+維護：CI 用的應用程式憑證會在 **2028-11-14** 到期，屆時在該應用程式新增一組用戶端密碼並更新 `AZURE_CLIENT_SECRET` 即可。要撤銷簽章權限時，刪除該應用程式（`cloudnest-github-signing`）與其在 Code Signing 帳戶上的角色指派，並移除這 7 個 secrets。
 
 只跑 UI（不需要 Wails / rclone）：
 
