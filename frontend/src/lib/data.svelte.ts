@@ -2,6 +2,7 @@
 // in a plain browser, then replaces them with live rclone data in Wails.
 import * as mock from './mock';
 import { backend, isWails } from './backend';
+import { app } from './state.svelte';
 import type { Account, Entry, HistoryItem, ProviderId, ProviderInfo } from './mock';
 
 const knownProviders: ProviderId[] = [
@@ -150,6 +151,10 @@ export async function boot(): Promise<void> {
     data.ready = true;
     await refreshAccounts();
     refreshHistory();
+  }
+  // First run: the welcome screen replaces an empty home page.
+  if (!b.onboarded && data.accounts.length === 0) {
+    app.go('onboarding');
   }
 }
 

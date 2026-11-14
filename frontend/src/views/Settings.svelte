@@ -201,6 +201,15 @@
             </div>
             <div class="set-row">
               <div class="sl">
+                <div class="st">{t('settings.logs')}</div>
+                <div class="sd">{t('settings.logsSub')}</div>
+              </div>
+              <div class="sc">
+                <button class="btn text sm" onclick={() => backend.openLogFolder()}>{t('common.view')}</button>
+              </div>
+            </div>
+            <div class="set-row">
+              <div class="sl">
                 <div class="st">{t('settings.proxy')}</div>
                 <div class="sd">{t('settings.proxySub')}</div>
               </div>
