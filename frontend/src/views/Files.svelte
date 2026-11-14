@@ -7,7 +7,8 @@
   import { t, fmtBytes, fmtTime } from '$lib/i18n';
   import { accountName, type Account, type Entry } from '$lib/mock';
   import { data, refreshCloud, refreshLocal, refreshRoots } from '$lib/data.svelte';
-  import { backend } from '$lib/backend';
+  import { backend, isWails } from '$lib/backend';
+  import { Events } from '@wailsio/runtime';
 
   let q = $state('');
   let newFolderOpen = $state(false);
@@ -138,6 +139,36 @@
     app.go('activity');
   }
 
+  // Files dropped from Explorer arrive as real paths through Wails. The pane
+  // under the pointer decides what happens; only the cloud pane accepts them.
+  function handleDrop(ev: { data?: { files?: string[]; x?: number; y?: number } }): void {
+    const files = ev.data?.files ?? [];
+    if (files.length === 0) return;
+    const hit = document.elementFromPoint(ev.data?.x ?? 0, ev.data?.y ?? 0);
+    const pane = hit?.closest('#drop-cloud, #drop-local');
+    if (pane?.id === 'drop-local') {
+      app.notify(t('files.dropLocalHint'));
+      return;
+    }
+    dropUpload(files);
+  }
+
+  async function dropUpload(paths: string[]): Promise<void> {
+    if (!account) {
+      app.notify(t('files.noAccount'));
+      return;
+    }
+    const res = (await backend.upload(account.id, data.cloudPath, paths)) as
+      | { err?: { message?: string } }
+      | null;
+    if (res?.err) {
+      app.notify(res.err.message ?? 'upload failed');
+      return;
+    }
+    app.notify(t('files.dropUploaded', { n: paths.length }));
+    app.go('activity');
+  }
+
   async function download(): Promise<void> {
     if (!account || selectedCloud.length === 0) return;
     busy = true;
@@ -184,6 +215,10 @@
 
   onMount(() => {
     refreshRoots();
+    if (!isWails) return;
+    // Wails reports drops on the Go side; it forwards the real paths here.
+    const off = Events.On('cloudnest:files-dropped', handleDrop as (ev: any) => void);
+    return () => off();
   });
 
   let listedFor = '';

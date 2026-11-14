@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/events"
 
 	"cloudnest/internal/engine"
 	"cloudnest/internal/platform"
@@ -110,7 +111,7 @@ func main() {
 		minHeight = height
 	}
 
-	app.Window.NewWithOptions(application.WebviewWindowOptions{
+	mainWindow := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:             "main",
 		Title:            "雲栖 Cloudnest",
 		Width:            width,
@@ -121,6 +122,26 @@ func main() {
 		BackgroundColour: application.NewRGB(254, 247, 255),
 		URL:              "/",
 		EnableFileDrop:   true,
+	})
+
+	// Dropped files carry real filesystem paths only on the Go side, so the
+	// payload is forwarded to the frontend, which decides which pane it hit.
+	mainWindow.OnWindowEvent(events.Common.WindowFilesDropped, func(e *application.WindowEvent) {
+		ctx := e.Context()
+		if ctx == nil {
+			return
+		}
+		files := ctx.DroppedFiles()
+		if len(files) == 0 {
+			return
+		}
+		payload := map[string]any{"files": files}
+		if target := ctx.DropTargetDetails(); target != nil {
+			payload["x"] = target.X
+			payload["y"] = target.Y
+			payload["elementId"] = target.ElementID
+		}
+		app.Event.Emit("cloudnest:files-dropped", payload)
 	})
 
 	go func() {
