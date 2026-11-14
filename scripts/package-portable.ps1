@@ -179,6 +179,13 @@ try {
 
     $licenseDir = Join-Path $PackageDir 'LICENSES'
     New-Item -ItemType Directory -Path $licenseDir -Force | Out-Null
+
+    $projectLicense = Join-Path $RepoRoot 'LICENSE'
+    if (-not (Test-Path -LiteralPath $projectLicense -PathType Leaf)) {
+        throw "LICENSE not found at $projectLicense."
+    }
+    Copy-Item -LiteralPath $projectLicense -Destination (Join-Path $licenseDir 'Cloudnest-MIT.txt') -Force
+
     $licensePath = Join-Path $licenseDir 'rclone-COPYING.txt'
     Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/rclone/rclone/master/COPYING' -OutFile $licensePath -UseBasicParsing
 
@@ -227,7 +234,8 @@ Cloudnest portable build
 
 4. Cloudnest uses rclone for cloud transfers. If bin\rclone.exe is present, that
    bundled copy is used. Otherwise install rclone 1.70 or newer and make sure
-   rclone.exe is on PATH. The rclone MIT license is in LICENSES\rclone-COPYING.txt.
+   rclone.exe is on PATH. Both programs are MIT licensed: see
+   LICENSES\Cloudnest-MIT.txt and LICENSES\rclone-COPYING.txt.
 
 Windows 10 note: Cloudnest uses the Microsoft Edge WebView2 runtime. If the app
 does not start (for example on a fresh Windows 10 machine), install the WebView2

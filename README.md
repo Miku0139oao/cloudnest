@@ -97,6 +97,12 @@ preview/               靜態 UI 預覽 + 截圖
 - **Portable**：ZIP 解壓即用，資料在程式資料夾 `data\`；不寫註冊表。
 - **不收集資料**：無遥測。
 
+## 下載
+
+- **最新正式版**：[Releases](https://github.com/Miku0139oao/cloudnest/releases)（`v*` 標籤觸發）
+- **Nightly**：每次 push 到 `main` 都會重建 [nightly 預發佈](https://github.com/Miku0139oao/cloudnest/releases/tag/nightly)，內容對應最新 commit
+- 兩者都是 portable ZIP：解壓即用，不寫註冊表、沒有安裝程式
+
 ## 授權與致謝
 
-本專案尚未附上 LICENSE。內附／使用的 [rclone](https://rclone.org/) 為 MIT 授權，打包時需一併附上其授權條文。
+本專案為 MIT 授權，條文見 [LICENSE](LICENSE)。內附的 [rclone](https://rclone.org/) 同樣是 MIT，打包時會一併附上其授權條文（`LICENSES\rclone-COPYING.txt`）。
