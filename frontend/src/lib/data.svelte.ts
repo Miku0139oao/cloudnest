@@ -151,9 +151,14 @@ export async function boot(): Promise<void> {
   }
 }
 
-export async function refreshAccounts(): Promise<void> {
+// refreshAccounts replaces the account list. A transient rclone hiccup can
+// return an empty list, which used to wipe every card off the screen, so an
+// empty answer only wins when the caller knows the list really is empty
+// (after removing the last account).
+export async function refreshAccounts(allowEmpty = false): Promise<void> {
   const res = await backend.listAccounts();
-  if (!res || !res.items) return;
+  if (!res || !res.items || res.err) return;
+  if (res.items.length === 0 && data.accounts.length > 0 && !allowEmpty) return;
   data.accounts = res.items.map(mapAccount);
   if (!data.activeAccount && data.accounts.length) {
     data.activeAccount = data.accounts[0].id;
@@ -162,13 +167,33 @@ export async function refreshAccounts(): Promise<void> {
 
 export async function refreshUsage(): Promise<void> {
   const snapshot = data.accounts.slice();
+  const retry: string[] = [];
   // Sequential: concurrent operations/about calls contend with file listings
   // inside the rclone Drive backend.
   for (const a of snapshot) {
     const u = await backend.accountUsage(a.id);
-    if (!u || u.err || u.total <= 0) continue;
+    if (!u || u.err || u.total <= 0) {
+      retry.push(a.id);
+      continue;
+    }
     const next = data.accounts.slice();
     const idx = next.findIndex((x) => x.id === a.id);
+    if (idx < 0) continue;
+    next[idx] = { ...next[idx], used: u.used, total: u.total };
+    data.accounts = next;
+  }
+  // A provider that timed out once usually answers on a second, quieter try.
+  if (retry.length) {
+    setTimeout(() => retryUsage(retry), 6000);
+  }
+}
+
+async function retryUsage(ids: string[]): Promise<void> {
+  for (const id of ids) {
+    const u = await backend.accountUsage(id);
+    if (!u || u.err || u.total <= 0) continue;
+    const next = data.accounts.slice();
+    const idx = next.findIndex((x) => x.id === id);
     if (idx < 0) continue;
     next[idx] = { ...next[idx], used: u.used, total: u.total };
     data.accounts = next;

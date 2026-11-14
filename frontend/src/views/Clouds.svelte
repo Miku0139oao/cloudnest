@@ -10,8 +10,14 @@
   import { backend } from '$lib/backend';
 
   onMount(() => {
-    const timer = setTimeout(() => refreshUsage(), 1500);
-    return () => clearTimeout(timer);
+    // Quota is cached for ten minutes in the backend, so a slow poll is cheap
+    // and repairs the "unknown" label after a provider hiccup.
+    const first = setTimeout(() => refreshUsage(), 1200);
+    const repeat = setInterval(() => refreshUsage(), 60000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(repeat);
+    };
   });
 
   let removeFor = $state<Account | null>(null);
@@ -26,7 +32,7 @@
     if (!removeFor || removing) return;
     removing = true;
     await backend.removeAccount(removeFor.id);
-    await refreshAccounts();
+    await refreshAccounts(true);
     removing = false;
     removeFor = null;
     app.notify(t('clouds.removed'));
