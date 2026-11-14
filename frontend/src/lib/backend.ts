@@ -69,6 +69,7 @@ export const backend = {
   toggleMaximise: () => safe(() => Service.WindowToggleMaximise()),
   close: () => safe(() => Service.WindowClose()),
   quit: () => safe(() => Service.Quit()),
+  confirmClose: () => safe(() => Service.ConfirmClose()),
   debug: (msg: string) => safe(() => Service.DebugLog(msg))
 };
 

@@ -26,6 +26,7 @@ type jobConfig struct {
 	Checkers  int    `json:"Checkers,omitempty"`
 	DryRun    bool   `json:"DryRun"`
 	BwLimit   string `json:"BwLimit,omitempty"`
+	Retries   int    `json:"Retries,omitempty"`
 }
 
 func newAsyncControl(async bool, group string, cfg *jobConfig) asyncControl {
@@ -303,6 +304,9 @@ func (c *Client) StartSync(ctx context.Context, kind string, in SyncIn) (int64, 
 	}
 	if limit := strings.TrimSpace(in.BwLimit); limit != "" && !strings.EqualFold(limit, "off") {
 		cfg.BwLimit = limit
+	}
+	if in.Retries > 0 {
+		cfg.Retries = in.Retries
 	}
 	req := syncRequest{
 		SrcFs:              in.SrcFs,

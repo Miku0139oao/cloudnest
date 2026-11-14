@@ -48,6 +48,14 @@ export function ChooseFolder(title: string): $CancellablePromise<dto$0.PathPick>
     return $Call.ByID(601793047, title);
 }
 
+/**
+ * ConfirmClose is the "stop and quit" answer to the close warning: it marks
+ * the close as intentional and quits, so the window hook steps aside.
+ */
+export function ConfirmClose(): $CancellablePromise<dto$0.Empty> {
+    return $Call.ByID(2169334390);
+}
+
 export function ConnectState(id: string): $CancellablePromise<dto$0.ConnectProgress> {
     return $Call.ByID(1417510581, id);
 }

@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -76,6 +77,10 @@ type Service struct {
 	order   []string
 	records []dto.Record
 	usage   map[string]usageEntry
+
+	// closing is set once the user confirms stopping an in-flight transfer, so
+	// the window close guard lets the second request through.
+	closing atomic.Bool
 }
 
 func New(app *application.App, eng engine.Engine, store *settings.Store, rclonePath string, logger *slog.Logger) *Service {
@@ -264,6 +269,16 @@ func (s *Service) WindowClose() dto.Empty {
 }
 
 func (s *Service) Quit() dto.Empty {
+	if s.app != nil {
+		s.app.Quit()
+	}
+	return dto.Empty{}
+}
+
+// ConfirmClose is the "stop and quit" answer to the close warning: it marks
+// the close as intentional and quits, so the window hook steps aside.
+func (s *Service) ConfirmClose() dto.Empty {
+	AllowClose(s)
 	if s.app != nil {
 		s.app.Quit()
 	}
@@ -796,6 +811,7 @@ func (s *Service) StartBackup(req dto.PlanRequest) dto.JobRef {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		jobID, err := c.StartSync(ctx, kind, rc.SyncIn{
 			SrcFs: src, DstFs: dstFs, Group: group, Transfers: transfers, Exclude: req.Excludes,
+			Retries: s.retries(),
 		})
 		cancel()
 		if err != nil {

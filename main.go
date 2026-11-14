@@ -124,6 +124,16 @@ func main() {
 		EnableFileDrop:   true,
 	})
 
+	// Closing during a transfer asks first: the transfers are stopped either
+	// way, but nobody loses a backup by accident.
+	mainWindow.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
+		if services.CloseConfirmed(svc) || services.ActiveTransfers(svc) == 0 {
+			return
+		}
+		e.Cancel()
+		app.Event.Emit("cloudnest:close-requested")
+	})
+
 	// Dropped files carry real filesystem paths only on the Go side, so the
 	// payload is forwarded to the frontend, which decides which pane it hit.
 	mainWindow.OnWindowEvent(events.Common.WindowFilesDropped, func(e *application.WindowEvent) {

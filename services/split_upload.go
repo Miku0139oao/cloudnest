@@ -389,6 +389,7 @@ func (s *Service) uploadSplitFile(ctx context.Context, cancel context.CancelFunc
 		DstFs:     j.AccountID + ":" + remoteParts,
 		Group:     j.Group,
 		Transfers: transfers,
+		Retries:   s.retries(),
 	})
 	startCancel()
 	if err != nil {

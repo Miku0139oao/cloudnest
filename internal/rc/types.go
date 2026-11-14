@@ -257,6 +257,9 @@ type SyncIn struct {
 	DryRun    bool     `json:"-"`
 	BwLimit   string   `json:"-"`
 	Exclude   []string `json:"-"`
+	// Retries maps to rclone's Retries option. 1 means "do not retry", which
+	// is how the Settings auto-retry switch is applied.
+	Retries int `json:"-"`
 }
 
 // ConfigOpt is the opt dictionary accepted by config/create and

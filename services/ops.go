@@ -165,9 +165,21 @@ func (s *Service) Upload(accountID, destPath string, localPaths []string) dto.Jo
 			target = joinRemotePath(dest, src.base)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), opsTimeout)
-		jobID, err := c.StartSync(ctx, "sync/copy", rc.SyncIn{
-			SrcFs: src.path, DstFs: fs + target, Group: group, Transfers: transfers,
-		})
+		var jobID int64
+		var err error
+		if src.isDir {
+			jobID, err = c.StartSync(ctx, "sync/copy", rc.SyncIn{
+				SrcFs: src.path, DstFs: fs + target, Group: group, Transfers: transfers,
+				Retries: s.retries(),
+			})
+		} else {
+			// sync/copy rejects a file as srcFs; a single file is copied by
+			// operations/copyfile instead.
+			jobID, err = c.StartCopyFile(ctx, rc.CopyFileIn{
+				SrcFs: filepath.Dir(src.path), SrcRemote: src.base,
+				DstFs: fs + dest, DstRemote: src.base, Group: group,
+			})
+		}
 		cancel()
 		if err != nil {
 			return dto.JobRef{Err: failFrom(err)}
@@ -253,9 +265,21 @@ func (s *Service) Download(accountID string, remotePaths []string, localDir stri
 			}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), opsTimeout)
-		jobID, err := c.StartSync(ctx, "sync/copy", rc.SyncIn{
-			SrcFs: fs + src.remote, DstFs: dst, Group: group, Transfers: transfers,
-		})
+		var jobID int64
+		var err error
+		if src.isDir {
+			jobID, err = c.StartSync(ctx, "sync/copy", rc.SyncIn{
+				SrcFs: fs + src.remote, DstFs: dst, Group: group, Transfers: transfers,
+				Retries: s.retries(),
+			})
+		} else {
+			// A remote file path is not a directory either, so single files
+			// come down with operations/copyfile.
+			jobID, err = c.StartCopyFile(ctx, rc.CopyFileIn{
+				SrcFs: fs + remoteDir(src.remote), SrcRemote: src.base,
+				DstFs: dst, DstRemote: src.base, Group: group,
+			})
+		}
 		cancel()
 		if err != nil {
 			return dto.JobRef{Err: failFrom(err)}
@@ -389,7 +413,15 @@ func (s *Service) ResumeJob(id string) dto.JobRef {
 		return dto.JobRef{Err: failFrom(err)}
 	}
 
-	type plan struct{ src, dst string }
+	// kind selects how one plan entry is executed: a directory goes through
+	// sync/copy, a single file through copyfile (sync/copy rejects a file as
+	// srcFs).
+	type plan struct {
+		kind      string // "sync" or "copy"
+		src, dst  string
+		srcRemote string
+		dstRemote string
+	}
 	var plans []plan
 	switch j.Kind {
 	case "backup", "upload":
@@ -398,11 +430,17 @@ func (s *Service) ResumeJob(id string) dto.JobRef {
 			if err != nil {
 				return dto.JobRef{Err: failFrom(err)}
 			}
-			dst := fs + j.DestRoot
+			base := filepath.Base(filepath.Clean(src))
 			if st.IsDir() {
-				dst = fs + joinRemotePath(j.DestRoot, filepath.Base(filepath.Clean(src)))
+				plans = append(plans, plan{
+					kind: "sync", src: src, dst: fs + joinRemotePath(j.DestRoot, base),
+				})
+				continue
 			}
-			plans = append(plans, plan{src: src, dst: dst})
+			plans = append(plans, plan{
+				kind: "copy", src: filepath.Dir(filepath.Clean(src)), srcRemote: base,
+				dst: fs + j.DestRoot, dstRemote: base,
+			})
 		}
 	case "download":
 		if strings.TrimSpace(j.DestRoot) == "" {
@@ -423,14 +461,18 @@ func (s *Service) ResumeJob(id string) dto.JobRef {
 			if st == nil {
 				return dto.JobRef{Err: &dto.Fail{Code: string(apperr.NotFound), Message: "not found"}}
 			}
-			dst := j.DestRoot
 			if st.IsDir {
-				dst = filepath.Join(j.DestRoot, remoteBase(remote))
+				dst := filepath.Join(j.DestRoot, remoteBase(remote))
 				if err := os.MkdirAll(dst, 0o755); err != nil {
 					return dto.JobRef{Err: failFrom(err)}
 				}
+				plans = append(plans, plan{kind: "sync", src: fs + remote, dst: dst})
+				continue
 			}
-			plans = append(plans, plan{src: fs + remote, dst: dst})
+			plans = append(plans, plan{
+				kind: "copy", src: fs + remoteDir(remote), srcRemote: remoteBase(remote),
+				dst: j.DestRoot, dstRemote: remoteBase(remote),
+			})
 		}
 	default:
 		return dto.JobRef{Err: &dto.Fail{Code: string(apperr.Unknown), Message: "job cannot be resumed"}}
@@ -443,9 +485,19 @@ func (s *Service) ResumeJob(id string) dto.JobRef {
 	newIDs := make([]int64, 0, len(plans))
 	for _, p := range plans {
 		ctx, cancel := context.WithTimeout(context.Background(), opsTimeout)
-		jobID, err := c.StartSync(ctx, "sync/copy", rc.SyncIn{
-			SrcFs: p.src, DstFs: p.dst, Group: j.Group, Transfers: transfers,
-		})
+		var jobID int64
+		var err error
+		if p.kind == "copy" {
+			jobID, err = c.StartCopyFile(ctx, rc.CopyFileIn{
+				SrcFs: p.src, SrcRemote: p.srcRemote,
+				DstFs: p.dst, DstRemote: p.dstRemote, Group: j.Group,
+			})
+		} else {
+			jobID, err = c.StartSync(ctx, "sync/copy", rc.SyncIn{
+				SrcFs: p.src, DstFs: p.dst, Group: j.Group, Transfers: transfers,
+				Retries: s.retries(),
+			})
+		}
 		cancel()
 		if err != nil {
 			return dto.JobRef{Err: failFrom(err)}
@@ -480,6 +532,15 @@ func (s *Service) defaultTransfers() int {
 		transfers = opsDefaultTransfers
 	}
 	return transfers
+}
+
+// retries maps the auto-retry switch to rclone's Retries option: off means a
+// failed file is reported straight away instead of being retried.
+func (s *Service) retries() int {
+	if s.store.Get().Backup.AutoRetry {
+		return 3
+	}
+	return 1
 }
 
 // accountFS validates a remote name and returns its rclone prefix. Rejecting
@@ -539,6 +600,16 @@ func remoteBase(p string) string {
 		return p[i+1:]
 	}
 	return p
+}
+
+// remoteDir returns the parent of a slash-separated remote path, or "" for a
+// path at the account root.
+func remoteDir(p string) string {
+	p = strings.TrimRight(p, "/")
+	if i := strings.LastIndex(p, "/"); i >= 0 {
+		return strings.Trim(p[:i], "/")
+	}
+	return ""
 }
 
 // splitDisplayName derives a user-facing name from a .cloudbox-part folder.
