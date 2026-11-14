@@ -11,6 +11,8 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 *.md text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
 
 # PowerShell scripts run on Windows; keep their native line endings.
 *.ps1 text eol=crlf

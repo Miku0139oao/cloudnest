@@ -37,6 +37,11 @@ const (
 type engine struct {
 	opts Options
 
+	// verbose and useProxy shape the rclone process environment. They are
+	// guarded by opMu because they are read while the process is launched.
+	verbose  bool
+	useProxy bool
+
 	// opMu serialises lifecycle operations (Start, Stop, Restart) and process
 	// replacement. It is never held while waiting for process output.
 	opMu sync.Mutex
@@ -81,6 +86,16 @@ func (e *engine) ConfigPath() string {
 		return e.configPath
 	}
 	return e.status.ConfigPath
+}
+
+// ApplyRuntime updates the process options that are only expressible through
+// rclone's environment. The values apply to the next start; a running process
+// keeps its old environment until Restart is called.
+func (e *engine) ApplyRuntime(verbose, useProxy bool) {
+	e.opMu.Lock()
+	e.verbose = verbose
+	e.useProxy = useProxy
+	e.opMu.Unlock()
 }
 
 // Client returns the RC client when the engine is ready.
@@ -310,7 +325,7 @@ func (e *engine) launchLocked(ctx context.Context, bin string, info VersionInfo,
 	client := rc.New(fmt.Sprintf("http://127.0.0.1:%d", port), user, pass, e.opts.Logger)
 
 	cmd := exec.Command(bin, "rcd")
-	cmd.Env = rcloneEnv(port, user, pass, configPath)
+	cmd.Env = rcloneEnv(port, user, pass, configPath, e.verbose, e.useProxy)
 	cmd.SysProcAttr = &syscall.SysProcAttr{}
 	platform.HideWindow(cmd.SysProcAttr)
 
@@ -712,15 +727,45 @@ func randomSecret() (string, error) {
 
 // rcloneEnv builds the rclone process environment, replacing any inherited
 // RCLONE_* settings which would conflict with Cloudnest's isolated instance.
-func rcloneEnv(port int, user, pass, configPath string) []string {
+//
+// Proxy handling: rclone honours HTTP_PROXY/HTTPS_PROXY/NO_PROXY, and inherited
+// values would silently win over the Settings toggle, so they are always
+// replaced. With useProxy the endpoints come from the Windows Internet
+// Settings (or, on other platforms, stay empty and Go falls back to the
+// environment); without it NO_PROXY=* sends every request direct.
+func rcloneEnv(port int, user, pass, configPath string, verbose, useProxy bool) []string {
+	level := "NOTICE"
+	if verbose {
+		level = "DEBUG"
+	}
 	overrides := map[string]string{
 		"RCLONE_RC_ADDR":    fmt.Sprintf("127.0.0.1:%d", port),
 		"RCLONE_RC_USER":    user,
 		"RCLONE_RC_PASS":    pass,
 		"RCLONE_RC_NO_AUTH": "false",
 		"RCLONE_CONFIG":     configPath,
-		"RCLONE_LOG_LEVEL":  "NOTICE",
+		"RCLONE_LOG_LEVEL":  level,
 		"RCLONE_STATS":      "0",
+
+		// Empty values remove the inherited variable (see mergeEnv).
+		"HTTP_PROXY":  "",
+		"HTTPS_PROXY": "",
+		"ALL_PROXY":   "",
+		"NO_PROXY":    "",
+	}
+	if useProxy {
+		httpProxy, httpsProxy, noProxy := platform.SystemProxy()
+		if httpProxy != "" {
+			overrides["HTTP_PROXY"] = httpProxy
+		}
+		if httpsProxy != "" {
+			overrides["HTTPS_PROXY"] = httpsProxy
+		}
+		if noProxy != "" {
+			overrides["NO_PROXY"] = noProxy
+		}
+	} else {
+		overrides["NO_PROXY"] = "*"
 	}
 	return mergeEnv(os.Environ(), overrides)
 }
@@ -738,8 +783,10 @@ func mergeEnv(base []string, overrides map[string]string) []string {
 		out = append(out, entry)
 	}
 	keys := make([]string, 0, len(overrides))
-	for key := range overrides {
-		keys = append(keys, key)
+	for key, value := range overrides {
+		if value != "" {
+			keys = append(keys, key)
+		}
 	}
 	sort.Strings(keys)
 	for _, key := range keys {

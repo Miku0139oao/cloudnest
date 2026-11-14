@@ -51,11 +51,16 @@ func main() {
 		logger.Info("rclone resolved", "path", rclonePath, "version", versionInfo.String())
 	}
 
+	prefs := store.Get()
 	eng := engine.New(engine.Options{
 		Logger: logger,
 		LogWriter: func(line string) {
 			fmt.Fprintln(logFile, line)
 		},
+		// The engine can only pick these up from its environment, so they are
+		// applied at launch and re-applied (plus a restart) when they change.
+		Verbose:  prefs.Advanced.Verbose,
+		UseProxy: prefs.Advanced.Proxy,
 	})
 
 	var app *application.App

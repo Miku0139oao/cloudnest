@@ -177,7 +177,7 @@ func TestRcloneEnvOverrides(t *testing.T) {
 	t.Setenv("RCLONE_RC_ADDR", "old")
 	t.Setenv("KEEP_ME", "yes")
 
-	env := rcloneEnv(12345, "rcuser", "rcpass", "C:/cfg/rclone.conf")
+	env := rcloneEnv(12345, "rcuser", "rcpass", "C:/cfg/rclone.conf", false, false)
 	values := envMap(env)
 	if values["RCLONE_RC_ADDR"] != "127.0.0.1:12345" {
 		t.Errorf("RCLONE_RC_ADDR = %q", values["RCLONE_RC_ADDR"])
@@ -199,6 +199,33 @@ func TestRcloneEnvOverrides(t *testing.T) {
 	}
 	if countEnvKey(env, "RCLONE_CONFIG") != 1 {
 		t.Errorf("RCLONE_CONFIG duplicated: %v", env)
+	}
+	// Proxy off: every request must go direct, even when the parent process
+	// exported a proxy.
+	if values["NO_PROXY"] != "*" {
+		t.Errorf("NO_PROXY = %q, want *", values["NO_PROXY"])
+	}
+	if countEnvKey(env, "HTTP_PROXY") != 0 {
+		t.Errorf("inherited HTTP_PROXY survived: %v", env)
+	}
+}
+
+func TestRcloneEnvVerboseAndProxy(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "http://inherited:8080")
+
+	verbose := envMap(rcloneEnv(1, "u", "p", "cfg", true, false))
+	if verbose["RCLONE_LOG_LEVEL"] != "DEBUG" {
+		t.Errorf("RCLONE_LOG_LEVEL = %q, want DEBUG", verbose["RCLONE_LOG_LEVEL"])
+	}
+
+	// Proxy on: NO_PROXY no longer forces direct connections and the inherited
+	// endpoint is dropped in favour of the system setting.
+	proxied := envMap(rcloneEnv(1, "u", "p", "cfg", false, true))
+	if proxied["NO_PROXY"] == "*" {
+		t.Error("system proxy mode must not force direct connections")
+	}
+	if got := proxied["HTTP_PROXY"]; got == "http://inherited:8080" {
+		t.Errorf("HTTP_PROXY = %q, want the system proxy", got)
 	}
 }
 

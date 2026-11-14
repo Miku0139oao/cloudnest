@@ -70,6 +70,10 @@ type Engine interface {
 	Subscribe(fn func(Status)) (unsubscribe func())
 	// ConfigPath returns the rclone config file Cloudnest uses.
 	ConfigPath() string
+	// ApplyRuntime updates the process options (verbose logging, system proxy)
+	// that can only be set through rclone's environment. The new values are used
+	// by the next start; callers that want them now call Restart.
+	ApplyRuntime(verbose, useProxy bool)
 }
 
 var (
@@ -96,6 +100,13 @@ type Options struct {
 	// LogWriter receives redacted lines from rclone's stdout/stderr. It may be
 	// called from the process-output goroutine.
 	LogWriter func(line string)
+	// Verbose raises rclone's log level to DEBUG. It takes effect at the next
+	// start; ApplyRuntime changes it on a running engine.
+	Verbose bool
+	// UseProxy makes rclone follow the operating system's HTTP proxy. When it
+	// is false any inherited proxy variables are cleared so transfers go direct.
+	// It takes effect at the next start.
+	UseProxy bool
 }
 
 // New creates an Engine. Paths are resolved eagerly when possible; Start
@@ -120,6 +131,8 @@ func New(opts Options) Engine {
 	}
 	e := &engine{
 		opts:     opts,
+		verbose:  opts.Verbose,
+		useProxy: opts.UseProxy,
 		ring:     NewRingBuffer(200),
 		notifyCh: make(chan struct{}, 1),
 		subs:     make(map[uint64]func(Status)),
