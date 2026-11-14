@@ -25,3 +25,16 @@ func AllowClose(s *Service) { s.closing.Store(true) }
 
 // CloseConfirmed reports whether AllowClose has been called.
 func CloseConfirmed(s *Service) bool { return s.closing.Load() }
+
+// UnmountAll detaches every rclone mount before the app exits. rclone hosts the
+// mount inside its own process, so quitting without this can leave a drive
+// letter pointing at nothing until the next logon.
+func UnmountAll(s *Service) {
+	if s == nil {
+		return
+	}
+	list := s.ListMounts()
+	for _, m := range list.Items {
+		_ = s.UnmountCloud(m.MountPoint)
+	}
+}

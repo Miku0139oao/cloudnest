@@ -87,6 +87,12 @@
     verbose = false;
     bwLimit = 'off';
     partSize = 256;
+    schedEnabled = false;
+    schedTime = '03:00';
+    schedSource = '';
+    schedAccount = '';
+    schedDest = '電腦備份';
+    schedMode = 'additive';
     persist();
   }
 

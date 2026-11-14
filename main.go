@@ -234,5 +234,6 @@ func main() {
 
 	stopCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	services.UnmountAll(svc)
 	_ = eng.Stop(stopCtx)
 }
