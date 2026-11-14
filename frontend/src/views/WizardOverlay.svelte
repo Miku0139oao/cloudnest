@@ -3,6 +3,7 @@
   import ProviderIcon from '$lib/components/ProviderIcon.svelte';
   import Ring from '$lib/components/Ring.svelte';
   import Modal from '$lib/components/Modal.svelte';
+  import CloudFolderPicker from './CloudFolderPicker.svelte';
   import { app } from '$lib/state.svelte';
   import { t, fmtBytes, fmtDuration } from '$lib/i18n';
   import { accounts as mockAccounts, backupSource, jobs, accountName } from '$lib/mock';
@@ -20,6 +21,7 @@
   let liveJob = $state<JobView | null>(null);
   let completed = $state(false);
   let showDeletions = $state(false);
+  let folderPicker = $state(false);
 
   interface PlanView {
     files: number;
@@ -338,7 +340,7 @@
                   </div>
                 </div>
                 <div class="as nums" style="color:var(--m3c-on-surface-variant)">
-                  {fmtBytes(a.total - a.used)} free
+                  {a.total > 0 ? `${fmtBytes(a.total - a.used)} free` : ''}
                 </div>
               </label>
             {/each}
@@ -347,18 +349,16 @@
           <div class="dest-block">
             <span class="hint">{t('wizard.s2.dest')}</span>
             <div class="breadcrumb">
-              <span class="crumb"><Icon name="folder" size={15} />{t('files.folder.backup')}</span>
+              {#each app.destRoot.split('/').filter(Boolean) as seg, i (seg + i)}
+                {#if i > 0}<span class="crumb-sep"><Icon name="chevron-right" size={16} /></span>{/if}
+                <span class="crumb"><Icon name="folder" size={15} />{seg}</span>
+              {/each}
               <span class="crumb-sep"><Icon name="chevron-right" size={16} /></span>
-              <span class="crumb"><Icon name="folder-open" size={15} />{src.name}</span>
+              <span class="crumb"><Icon name="folder-open" size={15} />{src.name || t('wizard.s1.none')}</span>
             </div>
-            <button class="btn text sm" onclick={() => app.notify(t('common.change'))}>
+            <button class="btn text sm" onclick={() => (folderPicker = true)}>
               {t('common.change')}
             </button>
-          </div>
-
-          <div class="banner info" style="align-items:center">
-            <Icon name="history" size={20} />
-            <div>{t('wizard.s2.hint', { files: (1240).toLocaleString('en-US') })}</div>
           </div>
 
           <button class="btn text sm" style="align-self:flex-start" onclick={() => app.go('clouds/add')}>
@@ -504,3 +504,15 @@
     </div>
   </div>
 </Modal>
+
+{#if folderPicker && currentAccount}
+  <CloudFolderPicker
+    accountID={currentAccount.id}
+    initial={app.destRoot}
+    onpick={(p) => {
+      app.destRoot = p || '電腦備份';
+      app.go(app.route);
+    }}
+    onclose={() => (folderPicker = false)}
+  />
+{/if}

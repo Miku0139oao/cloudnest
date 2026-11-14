@@ -67,7 +67,13 @@
   }
 
   onMount(() => {
-    start();
+    if (app.params.session) {
+      session = app.params.session;
+      phase = 'waiting';
+      poll();
+    } else {
+      start();
+    }
     timer = setInterval(poll, 700);
   });
 

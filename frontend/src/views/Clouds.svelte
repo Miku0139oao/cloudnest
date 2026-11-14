@@ -25,6 +25,15 @@
     removeFor = null;
     app.notify(t('clouds.removed'));
   }
+
+  async function relogin(a: Account): Promise<void> {
+    const res = await backend.beginConnect(a.provider, a.name);
+    if (res?.id) {
+      app.go('clouds/oauth', { provider: a.provider, session: res.id });
+    } else {
+      app.notify(res?.err?.message ?? t('sheet.signInFailed'));
+    }
+  }
 </script>
 
 <div class="scroll">
@@ -78,7 +87,7 @@
             <button type="button" onclick={() => { closeMenu(a.id); app.go('files'); }}>
               <Icon name="folder-open" size={18} />{t('clouds.browse')}
             </button>
-            <button type="button" onclick={() => { closeMenu(a.id); app.notify(t('clouds.reloginAction')); }}>
+            <button type="button" onclick={() => { closeMenu(a.id); relogin(a); }}>
               <Icon name="key" size={18} />{t('clouds.reloginAction')}
             </button>
             <hr class="divider" />
