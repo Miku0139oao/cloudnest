@@ -112,6 +112,9 @@ func (s *Service) Bootstrap() dto.Bootstrap {
 	if st.State == engine.StateReady {
 		// Accounts are fetched by the frontend once it is ready; keeping
 		// Bootstrap fast avoids blocking the first paint on slow providers.
+		if limit := s.store.Get().Backup.BwLimit; limit != "" && limit != "off" {
+			go s.ApplyBwLimit(limit)
+		}
 	}
 	s.mu.Lock()
 	out.Recent = append([]dto.Record(nil), s.records...)
@@ -136,6 +139,7 @@ func (s *Service) RestartEngine() dto.Empty {
 func (s *Service) GetSettings() dto.Settings { return s.store.Get() }
 
 func (s *Service) SaveSettings(in dto.Settings) dto.Empty {
+	before := s.store.Get().Advanced
 	_ = s.store.Update(func(cur *dto.Settings) {
 		if in.Language != "" {
 			cur.Language = in.Language
@@ -146,6 +150,20 @@ func (s *Service) SaveSettings(in dto.Settings) dto.Empty {
 		cur.Backup = in.Backup
 		cur.Advanced = in.Advanced
 	})
+	after := s.store.Get().Advanced
+	// Proxy and verbose logging live in rclone's environment, so a change can
+	// only take effect by relaunching it. Restart in the background so the
+	// settings dialog stays responsive.
+	if after.Proxy != before.Proxy || after.Verbose != before.Verbose {
+		s.eng.ApplyRuntime(after.Verbose, after.Proxy)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := s.eng.Restart(ctx); err != nil && s.log != nil {
+				s.log.Warn("restart after settings change", "err", err)
+			}
+		}()
+	}
 	return dto.Empty{}
 }
 
@@ -249,6 +267,21 @@ func (s *Service) Quit() dto.Empty {
 // DebugLog lets the frontend write a line to the application log.
 func (s *Service) DebugLog(msg string) dto.Empty {
 	s.log.Info("frontend: " + msg)
+	return dto.Empty{}
+}
+
+// ApplyBwLimit sets the rclone-wide bandwidth limit (e.g. "off", "1M").
+func (s *Service) ApplyBwLimit(rate string) dto.Empty {
+	c, fail := s.client()
+	if fail != nil {
+		return dto.Empty{}
+	}
+	if strings.TrimSpace(rate) == "" {
+		rate = "off"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = c.Call(ctx, "core/bwlimit", map[string]any{"rate": rate}, nil)
 	return dto.Empty{}
 }
 
@@ -602,10 +635,10 @@ func (s *Service) StartBackup(req dto.PlanRequest) dto.JobRef {
 
 	// Large-file acceleration is additive-only: a mirror sync would delete the
 	// remote .cloudbox-part folders because they never exist in the source.
-	splitOpts := splitOptionsFor(req.Mode)
+	splitOpts := splitOptionsFor(req.Mode, s.store.Get().Backup.PartSizeMB)
 	var plan *splitBackupPlan
 	if req.FastFiles && splitOpts.Enabled {
-		p, err := buildSplitPlan(req.SourcePaths, dest, splitOpts)
+		p, err := buildSplitPlan(req.SourcePaths, dest, splitOpts, req.Excludes)
 		if err != nil {
 			return dto.JobRef{Err: failFrom(err)}
 		}
@@ -634,7 +667,7 @@ func (s *Service) StartBackup(req dto.PlanRequest) dto.JobRef {
 				// started after the job is registered.
 				if sp.copySmall {
 					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-					smallJobID, err := startSmallFileSync(ctx, c, src, dstFs, group, transfers, splitOpts.Threshold)
+					smallJobID, err := startSmallFileSync(ctx, c, src, dstFs, group, transfers, splitOpts.Threshold, req.Excludes)
 					cancel()
 					if err != nil {
 						return dto.JobRef{Err: failFrom(err)}
@@ -647,7 +680,7 @@ func (s *Service) StartBackup(req dto.PlanRequest) dto.JobRef {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		jobID, err := c.StartSync(ctx, kind, rc.SyncIn{
-			SrcFs: src, DstFs: dstFs, Group: group, Transfers: transfers,
+			SrcFs: src, DstFs: dstFs, Group: group, Transfers: transfers, Exclude: req.Excludes,
 		})
 		cancel()
 		if err != nil {

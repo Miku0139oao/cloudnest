@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"cloudnest/internal/planner"
 	"cloudnest/internal/platform"
 	"cloudnest/internal/rc"
 	"cloudnest/internal/split"
@@ -88,13 +89,17 @@ func (p *splitBackupPlan) totalBytes() int64 {
 	return n
 }
 
-// splitOptionsFor returns the split options for a backup mode. Mirror mode is
-// deliberately excluded: sync/sync would delete the remote .cloudbox-part
-// directories because they do not exist in the local source tree.
-func splitOptionsFor(mode string) split.Options {
+// splitOptionsFor returns the split options for a backup mode, applying the
+// part size the user picked in Settings (in MiB; <= 0 keeps the default).
+// Mirror mode is deliberately excluded: sync/sync would delete the remote
+// .cloudbox-part directories because they do not exist in the local source tree.
+func splitOptionsFor(mode string, partSizeMB int) split.Options {
 	opts := split.DefaultOptions()
 	if mode == "mirror" {
 		opts.Enabled = false
+	}
+	if partSizeMB > 0 {
+		opts.PartSize = int64(partSizeMB) << 20
 	}
 	return opts
 }
@@ -130,8 +135,9 @@ func splitFileStagingDir(root, jobID string, n int) string {
 
 // buildSplitPlan stats every source and walks folders to find files at or
 // above the split threshold. Sources without large files are left to the
-// caller's normal sync/copy path.
-func buildSplitPlan(sources []string, dest string, opts split.Options) (*splitBackupPlan, error) {
+// caller's normal sync/copy path. Excluded paths are skipped so they are never
+// split; the small-file sync filters them out on rclone's side.
+func buildSplitPlan(sources []string, dest string, opts split.Options, excludes []string) (*splitBackupPlan, error) {
 	plan := &splitBackupPlan{sources: make([]splitSourcePlan, len(sources))}
 	for i, src := range sources {
 		st, err := os.Stat(src)
@@ -172,6 +178,9 @@ func buildSplitPlan(sources []string, dest string, opts split.Options) (*splitBa
 				return nil
 			}
 			relSlash := filepath.ToSlash(rel)
+			if planner.Excluded(relSlash, excludes) {
+				return nil
+			}
 			destDir := rootDest
 			if dir := path.Dir(relSlash); dir != "." && dir != "" {
 				destDir = joinRemotePath(rootDest, dir)
@@ -211,9 +220,10 @@ func newSplitFile(localPath, name, rel string, size int64, modTime time.Time, de
 }
 
 // filteredSyncRequest builds a sync/copy request which only transfers files
-// smaller than maxSize. rc.SyncIn intentionally does not expose rclone's
-// _filter group, so this helper speaks the RC shape directly.
-func filteredSyncRequest(srcFs, dstFs, group string, transfers int, maxSize int64) map[string]any {
+// smaller than maxSize and outside excludes. rc.SyncIn only knows a single
+// Exclude list, so this helper speaks the RC shape directly to combine the
+// size cap with the user's patterns.
+func filteredSyncRequest(srcFs, dstFs, group string, transfers int, maxSize int64, excludes []string) map[string]any {
 	cfg := map[string]any{"DryRun": false}
 	if transfers > 0 {
 		cfg["Transfers"] = transfers
@@ -221,20 +231,24 @@ func filteredSyncRequest(srcFs, dstFs, group string, transfers int, maxSize int6
 	if maxSize < 0 {
 		maxSize = 0
 	}
+	filter := map[string]any{"MaxSize": strconv.FormatInt(maxSize, 10)}
+	if len(excludes) > 0 {
+		filter["Exclude"] = append([]string(nil), excludes...)
+	}
 	return map[string]any{
 		"srcFs":   srcFs,
 		"dstFs":   dstFs,
 		"_async":  true,
 		"_group":  group,
 		"_config": cfg,
-		"_filter": map[string]any{"MaxSize": strconv.FormatInt(maxSize, 10)},
+		"_filter": filter,
 	}
 }
 
 // startSmallFileSync starts the one sync/copy per folder source which carries
 // everything below the split threshold. Large files are uploaded separately.
-func startSmallFileSync(ctx context.Context, c *rc.Client, srcFs, dstFs, group string, transfers int, threshold int64) (int64, error) {
-	req := filteredSyncRequest(srcFs, dstFs, group, transfers, threshold-1)
+func startSmallFileSync(ctx context.Context, c *rc.Client, srcFs, dstFs, group string, transfers int, threshold int64, excludes []string) (int64, error) {
+	req := filteredSyncRequest(srcFs, dstFs, group, transfers, threshold-1, excludes)
 	var resp struct {
 		JobID int64 `json:"jobid"`
 	}

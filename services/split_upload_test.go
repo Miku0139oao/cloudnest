@@ -55,20 +55,27 @@ func TestSplitStagingDirNames(t *testing.T) {
 }
 
 func TestSplitOptionsFor(t *testing.T) {
-	additive := splitOptionsFor("")
+	additive := splitOptionsFor("", 0)
 	if !additive.Enabled {
 		t.Fatal("additive backups must allow split uploads")
 	}
 	if additive.Threshold != split.DefaultOptions().Threshold {
 		t.Fatalf("threshold = %d, want %d", additive.Threshold, split.DefaultOptions().Threshold)
 	}
-	if mirror := splitOptionsFor("mirror"); mirror.Enabled {
+	if additive.PartSize != split.DefaultOptions().PartSize {
+		t.Fatalf("part size = %d, want default %d", additive.PartSize, split.DefaultOptions().PartSize)
+	}
+	if mirror := splitOptionsFor("mirror", 512); mirror.Enabled {
 		t.Fatal("mirror mode must disable split uploads")
+	}
+	// The Settings part-size picker is in MiB and must reach split.Options.
+	if got, want := splitOptionsFor("", 512).PartSize, int64(512)<<20; got != want {
+		t.Fatalf("part size = %d, want %d", got, want)
 	}
 }
 
 func TestFilteredSyncRequest(t *testing.T) {
-	req := filteredSyncRequest(`C:\src`, "acct:backup", "gui-job-1", 4, 7)
+	req := filteredSyncRequest(`C:\src`, "acct:backup", "gui-job-1", 4, 7, []string{"*.tmp", "node_modules"})
 
 	if req["srcFs"] != `C:\src` || req["dstFs"] != "acct:backup" {
 		t.Fatalf("unexpected fs fields: %#v", req)
@@ -83,6 +90,10 @@ func TestFilteredSyncRequest(t *testing.T) {
 	}
 	if filter["MaxSize"] != "7" {
 		t.Fatalf("MaxSize = %#v, want \"7\"", filter["MaxSize"])
+	}
+	excludes, ok := filter["Exclude"].([]string)
+	if !ok || len(excludes) != 2 || excludes[0] != "*.tmp" || excludes[1] != "node_modules" {
+		t.Fatalf("Exclude = %#v, want the caller's patterns", filter["Exclude"])
 	}
 
 	cfg, ok := req["_config"].(map[string]any)
@@ -104,13 +115,24 @@ func TestFilteredSyncRequest(t *testing.T) {
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		t.Fatalf("unmarshal request: %v", err)
 	}
-	if decoded["_filter"].(map[string]any)["MaxSize"] != "7" {
+	decodedFilter := decoded["_filter"].(map[string]any)
+	if decodedFilter["MaxSize"] != "7" {
 		t.Fatalf("MaxSize did not survive JSON encoding: %s", raw)
 	}
+	encodedExcludes, ok := decodedFilter["Exclude"].([]any)
+	if !ok || len(encodedExcludes) != 2 || encodedExcludes[0] != "*.tmp" {
+		t.Fatalf("Exclude did not survive JSON encoding: %s", raw)
+	}
 
-	noTransfers := filteredSyncRequest("a", "b", "g", 0, 0)
+	noTransfers := filteredSyncRequest("a", "b", "g", 0, -1, nil)
 	if _, exists := noTransfers["_config"].(map[string]any)["Transfers"]; exists {
 		t.Fatal("Transfers must be omitted when it is not positive")
+	}
+	if _, exists := noTransfers["_filter"].(map[string]any)["Exclude"]; exists {
+		t.Fatal("Exclude must be omitted when there are no patterns")
+	}
+	if noTransfers["_filter"].(map[string]any)["MaxSize"] != "0" {
+		t.Fatalf("MaxSize = %#v, want \"0\" for a negative cap", noTransfers["_filter"].(map[string]any)["MaxSize"])
 	}
 }
 
@@ -127,7 +149,7 @@ func TestBuildSplitPlan(t *testing.T) {
 	writeSizedFile(t, singleLarge, 30)
 
 	opts := split.Options{Enabled: true, Threshold: 8, PartSize: 4, MinParts: 2, MaxParts: 4}
-	plan, err := buildSplitPlan([]string{folder, singleSmall, singleLarge}, "backup", opts)
+	plan, err := buildSplitPlan([]string{folder, singleSmall, singleLarge}, "backup", opts, nil)
 	if err != nil {
 		t.Fatalf("buildSplitPlan: %v", err)
 	}
@@ -186,7 +208,7 @@ func TestBuildSplitPlanWithoutLargeFiles(t *testing.T) {
 	writeSizedFile(t, filepath.Join(folder, "b.txt"), 5)
 
 	opts := split.Options{Enabled: true, Threshold: 100, PartSize: 10, MinParts: 2, MaxParts: 4}
-	plan, err := buildSplitPlan([]string{folder}, "backup", opts)
+	plan, err := buildSplitPlan([]string{folder}, "backup", opts, nil)
 	if err != nil {
 		t.Fatalf("buildSplitPlan: %v", err)
 	}
@@ -198,13 +220,42 @@ func TestBuildSplitPlanWithoutLargeFiles(t *testing.T) {
 	}
 }
 
+func TestBuildSplitPlanSkipsExcluded(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "photos")
+	writeSizedFile(t, filepath.Join(folder, "keep.bin"), 16)
+	writeSizedFile(t, filepath.Join(folder, "skip.tmp"), 20)
+	writeSizedFile(t, filepath.Join(folder, "cache", "old.bin"), 30)
+
+	opts := split.Options{Enabled: true, Threshold: 8, PartSize: 4, MinParts: 2, MaxParts: 4}
+	plan, err := buildSplitPlan([]string{folder}, "backup", opts, []string{"*.tmp", "cache"})
+	if err != nil {
+		t.Fatalf("buildSplitPlan: %v", err)
+	}
+	if got := len(plan.files); got != 1 {
+		t.Fatalf("files = %d, want 1: %#v", got, plan.files)
+	}
+	if _, ok := findSplitFile(plan.files, "keep.bin"); !ok {
+		t.Fatal("keep.bin should still be split")
+	}
+	if _, ok := findSplitFile(plan.files, "skip.tmp"); ok {
+		t.Fatal("skip.tmp matched an exclude but was selected")
+	}
+	if _, ok := findSplitFile(plan.files, "old.bin"); ok {
+		t.Fatal("cache/old.bin is below an excluded directory but was selected")
+	}
+	if !plan.sources[0].copySmall {
+		t.Fatal("copySmall should stay true for the remaining large file")
+	}
+}
+
 func TestBuildSplitPlanDisabled(t *testing.T) {
 	root := t.TempDir()
 	folder := filepath.Join(root, "raw")
 	writeSizedFile(t, filepath.Join(folder, "huge.bin"), 50)
 
 	opts := split.Options{Enabled: false, Threshold: 8, PartSize: 4, MinParts: 2, MaxParts: 4}
-	plan, err := buildSplitPlan([]string{folder}, "backup", opts)
+	plan, err := buildSplitPlan([]string{folder}, "backup", opts, nil)
 	if err != nil {
 		t.Fatalf("buildSplitPlan: %v", err)
 	}

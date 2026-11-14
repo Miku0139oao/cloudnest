@@ -409,6 +409,13 @@ func normalizeExcludes(patterns []string) []string {
 	return out
 }
 
+// Excluded reports whether the slash-relative path rel matches any of
+// patterns, using the same rules as Plan. Both arguments are normalized here so
+// callers can pass raw user input and native separators.
+func Excluded(rel string, patterns []string) bool {
+	return isExcluded(normalizeRel(rel), normalizeExcludes(patterns))
+}
+
 // isExcluded applies simple, case-insensitive globs to the full relative path,
 // its base name and every ancestor directory. Testing ancestors gives
 // directory excludes subtree semantics (for example "node_modules").

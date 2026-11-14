@@ -246,10 +246,12 @@ type SyncIn struct {
 	DstFs              string `json:"dstFs"`
 	CreateEmptySrcDirs bool   `json:"createEmptySrcDirs,omitempty"`
 
-	Group     string `json:"-"`
-	Transfers int    `json:"-"`
-	Checkers  int    `json:"-"`
-	DryRun    bool   `json:"-"`
+	Group     string   `json:"-"`
+	Transfers int      `json:"-"`
+	Checkers  int      `json:"-"`
+	DryRun    bool     `json:"-"`
+	BwLimit   string   `json:"-"`
+	Exclude   []string `json:"-"`
 }
 
 // ConfigOpt is the opt dictionary accepted by config/create and

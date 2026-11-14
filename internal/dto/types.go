@@ -230,6 +230,7 @@ type PlanRequest struct {
 	Mode        string   `json:"mode"` // additive | mirror
 	FastFiles   bool     `json:"fastFiles"`
 	Transfers   int      `json:"transfers"`
+	Excludes    []string `json:"excludes"`
 }
 
 type BackupPlan struct {

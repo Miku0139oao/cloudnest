@@ -22,9 +22,10 @@ type asyncControl struct {
 
 // jobConfig is the subset of rclone's per-job configuration Cloudnest uses.
 type jobConfig struct {
-	Transfers int  `json:"Transfers,omitempty"`
-	Checkers  int  `json:"Checkers,omitempty"`
-	DryRun    bool `json:"DryRun"`
+	Transfers int    `json:"Transfers,omitempty"`
+	Checkers  int    `json:"Checkers,omitempty"`
+	DryRun    bool   `json:"DryRun"`
+	BwLimit   string `json:"BwLimit,omitempty"`
 }
 
 func newAsyncControl(async bool, group string, cfg *jobConfig) asyncControl {
@@ -235,7 +236,7 @@ func (c *Client) CopyFile(ctx context.Context, in CopyFileIn) error {
 // always asynchronous and carries _group and _config; in.Group controls the
 // group and is generated when empty. in.Transfers and in.Checkers are only
 // added to _config when positive so rclone keeps its defaults; DryRun is
-// always included.
+// always included. in.Exclude becomes a _filter group, omitted when empty.
 func (c *Client) StartSync(ctx context.Context, kind string, in SyncIn) (int64, error) {
 	method, err := syncMethod(kind)
 	if err != nil {
@@ -255,11 +256,17 @@ func (c *Client) StartSync(ctx context.Context, kind string, in SyncIn) (int64, 
 	if in.Checkers > 0 {
 		cfg.Checkers = in.Checkers
 	}
+	if limit := strings.TrimSpace(in.BwLimit); limit != "" && !strings.EqualFold(limit, "off") {
+		cfg.BwLimit = limit
+	}
 	req := syncRequest{
 		SrcFs:              in.SrcFs,
 		DstFs:              in.DstFs,
 		CreateEmptySrcDirs: in.CreateEmptySrcDirs,
 		asyncControl:       newAsyncControl(true, group, cfg),
+	}
+	if len(in.Exclude) > 0 {
+		req.Filter = &syncFilter{Exclude: in.Exclude}
 	}
 	var resp struct {
 		JobID int64 `json:"jobid"`
@@ -274,10 +281,16 @@ func (c *Client) StartSync(ctx context.Context, kind string, in SyncIn) (int64, 
 }
 
 type syncRequest struct {
-	SrcFs              string `json:"srcFs"`
-	DstFs              string `json:"dstFs"`
-	CreateEmptySrcDirs bool   `json:"createEmptySrcDirs,omitempty"`
+	SrcFs              string      `json:"srcFs"`
+	DstFs              string      `json:"dstFs"`
+	CreateEmptySrcDirs bool        `json:"createEmptySrcDirs,omitempty"`
+	Filter             *syncFilter `json:"_filter,omitempty"`
 	asyncControl
+}
+
+// syncFilter is the subset of rclone's _filter group used by StartSync.
+type syncFilter struct {
+	Exclude []string `json:"Exclude,omitempty"`
 }
 
 func syncMethod(kind string) (string, error) {

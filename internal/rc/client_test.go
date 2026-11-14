@@ -270,12 +270,57 @@ func TestStartSyncBuildsControlFields(t *testing.T) {
 	}
 }
 
+func TestStartSyncSendsExcludes(t *testing.T) {
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		filter, ok := body["_filter"].(map[string]any)
+		if !ok {
+			t.Fatalf("_filter = %v, want map", body["_filter"])
+		}
+		excludes, ok := filter["Exclude"].([]any)
+		if !ok || len(excludes) != 2 || excludes[0] != "*.tmp" || excludes[1] != "node_modules" {
+			t.Errorf("Exclude = %#v, want the caller's patterns", filter["Exclude"])
+		}
+		io.WriteString(w, `{"jobid":7}`)
+	})
+
+	jobID, err := client.StartSync(context.Background(), "sync", SyncIn{
+		SrcFs: "src:", DstFs: "dst:", Exclude: []string{"*.tmp", "node_modules"},
+	})
+	if err != nil {
+		t.Fatalf("StartSync: %v", err)
+	}
+	if jobID != 7 {
+		t.Fatalf("jobID = %d", jobID)
+	}
+}
+
+func TestStartSyncOmitsEmptyFilter(t *testing.T) {
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		if value, ok := body["_filter"]; ok {
+			t.Errorf("_filter = %v, want it omitted when there are no patterns", value)
+		}
+		io.WriteString(w, `{"jobid":7}`)
+	})
+
+	if _, err := client.StartSync(context.Background(), "copy", SyncIn{SrcFs: "a", DstFs: "b"}); err != nil {
+		t.Fatalf("StartSync: %v", err)
+	}
+}
+
 func TestSyncInDoesNotLeakControlFields(t *testing.T) {
-	body, err := json.Marshal(SyncIn{SrcFs: "a", DstFs: "b", Group: "g", Transfers: 8, DryRun: true})
+	body, err := json.Marshal(SyncIn{SrcFs: "a", DstFs: "b", Group: "g", Transfers: 8, DryRun: true, Exclude: []string{"*.tmp"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"_async", "_group", "_config", "Group", "Transfers"} {
+	for _, key := range []string{"_async", "_group", "_config", "Group", "Transfers", "Exclude", "*.tmp"} {
 		if strings.Contains(string(body), key) {
 			t.Errorf("SyncIn JSON contains %q: %s", key, body)
 		}

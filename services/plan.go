@@ -86,6 +86,7 @@ func (s *Service) Plan(req dto.PlanRequest) dto.PlanResult {
 		LocalRoot:   req.SourcePaths[0],
 		RemotePath:  strings.Trim(req.DestRoot, "/"),
 		Mode:        mode,
+		Excludes:    req.Excludes,
 		MaxEntries:  planner.DefaultMaxEntries,
 		TokenSecret: secret,
 		TokenTTL:    10 * time.Minute,
