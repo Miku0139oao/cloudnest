@@ -25,6 +25,11 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// instanceID identifies this application for the single-instance lock. It is a
+// variable so a smoke-test build can run next to an installed copy
+// (-ldflags "-X main.instanceID=...").
+var instanceID = "app.cloudnest.desktop"
+
 func main() {
 	_ = platform.EnsureDirs()
 	dataDir, err := platform.DataDir()
@@ -81,7 +86,7 @@ func main() {
 		Logger:   appLogger,
 		LogLevel: slog.LevelWarn,
 		SingleInstance: &application.SingleInstanceOptions{
-			UniqueID: "app.cloudnest.desktop",
+			UniqueID: instanceID,
 			OnSecondInstanceLaunch: func(data application.SecondInstanceData) {
 				if w, ok := app.Window.GetByName("main"); ok {
 					w.Restore()
@@ -92,29 +97,32 @@ func main() {
 	})
 	services.AttachApp(svc, app)
 
-	// Window geometry: reuse the saved size when it still fits the primary
-	// display, otherwise fall back to 1280x820. The saved position is only
-	// trusted when it still lands on this screen, so a monitor change cannot
-	// leave the window off-screen.
+	// Window geometry: reuse the saved size when it is at least the minimum,
+	// otherwise fall back to 1280x820. The screen manager is not reliable
+	// before Run, so the saved values are taken first and only validated
+	// against the work area when it can be queried.
 	minWidth, minHeight := 1080, 720
 	width, height := 1280, 820
 	startX, startY := 0, 0
 	restorePos := false
+	if saved := prefs.Window; saved.Width >= minWidth && saved.Height >= minHeight {
+		width, height = saved.Width, saved.Height
+		if saved.X != 0 || saved.Y != 0 {
+			startX, startY = saved.X, saved.Y
+			restorePos = true
+		}
+	}
 	if screen := app.Screen.GetPrimary(); screen != nil {
 		if wa := screen.WorkArea; wa.Width > 0 && wa.Height > 0 {
-			if saved := prefs.Window; saved.Width >= minWidth && saved.Height >= minHeight {
-				width, height = saved.Width, saved.Height
-				if saved.X >= wa.X && saved.Y >= wa.Y &&
-					saved.X < wa.X+wa.Width-200 && saved.Y < wa.Y+wa.Height-120 {
-					startX, startY = saved.X, saved.Y
-					restorePos = true
-				}
-			}
 			if width > wa.Width-40 {
 				width = wa.Width - 40
 			}
 			if height > wa.Height-40 {
 				height = wa.Height - 40
+			}
+			if restorePos && (startX < wa.X || startY < wa.Y ||
+				startX >= wa.X+wa.Width-200 || startY >= wa.Y+wa.Height-120) {
+				restorePos = false
 			}
 		}
 	}
@@ -124,8 +132,13 @@ func main() {
 	if minHeight > height {
 		minHeight = height
 	}
+	logger.Info("window geometry",
+		"saved", fmt.Sprintf("%dx%d@%d,%d", prefs.Window.Width, prefs.Window.Height, prefs.Window.X, prefs.Window.Y),
+		"using", fmt.Sprintf("%dx%d@%d,%d", width, height, startX, startY),
+		"restorePos", restorePos,
+	)
 
-	mainWindow := app.Window.NewWithOptions(application.WebviewWindowOptions{
+	windowOpts := application.WebviewWindowOptions{
 		Name:             "main",
 		Title:            "雲栖 Cloudnest",
 		Width:            width,
@@ -136,10 +149,15 @@ func main() {
 		BackgroundColour: application.NewRGB(254, 247, 255),
 		URL:              "/",
 		EnableFileDrop:   true,
-	})
-	if restorePos {
-		mainWindow.SetPosition(startX, startY)
 	}
+	if restorePos {
+		// The start position has to go through the options: calling
+		// SetPosition before the window is shown has no effect.
+		windowOpts.InitialPosition = application.WindowXY
+		windowOpts.X = startX
+		windowOpts.Y = startY
+	}
+	mainWindow := app.Window.NewWithOptions(windowOpts)
 
 	// Remember the geometry. Saving on every resize would rewrite settings.json
 	// continuously, so the write is debounced and also flushed when closing.
