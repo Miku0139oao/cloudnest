@@ -1,15 +1,20 @@
 name: Release
 
+# Tags publish a stable release; every push to main refreshes the "nightly"
+# pre-release so there is always a ZIP that matches the latest commit.
 on:
   push:
     tags:
       - 'v*'
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  release:
+  portable:
     name: Build portable Windows release
     runs-on: windows-latest
 
@@ -51,17 +56,39 @@ jobs:
 
       - name: Package portable ZIP
         shell: pwsh
-        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -Version "$env:GITHUB_REF_NAME"
+        env:
+          # A tag names the build; anything else is the rolling nightly.
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'nightly' }}
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -Version "$env:VERSION" -SkipBuild
 
-      - name: Create GitHub Release
+      - name: Publish release
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'nightly' }}
         run: |
-          $tag = $env:GITHUB_REF_NAME
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:VERSION
           $zip = "dist/Cloudnest-$tag-win64.zip"
           if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) {
             throw "Release archive not found: $zip"
           }
-          $notes = "Portable Windows x64 ZIP.`n`n- No installer: unzip the archive anywhere writable and run Cloudnest.exe.`n- Settings, logs and staging files live in the data\ folder next to the executable.`n- On Windows 10, if the app does not start, install the WebView2 runtime from runtime\MicrosoftEdgeWebview2Setup.exe.`n- rclone is bundled in bin\rclone.exe; its MIT license is in LICENSES\rclone-COPYING.txt."
-          gh release create "$tag" "$zip" --title "Cloudnest $tag" --notes $notes
+
+          $body = "Portable Windows x64 ZIP.`n`n" +
+            "- No installer: unzip the archive anywhere writable and run Cloudnest.exe.`n" +
+            "- Settings, logs and staging files live in the data\ folder next to the executable.`n" +
+            "- On Windows 10, if the app does not start, install the WebView2 runtime from runtime\MicrosoftEdgeWebview2Setup.exe.`n" +
+            "- rclone is bundled in bin\rclone.exe. Cloudnest and rclone are MIT licensed (LICENSES\)."
+
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            gh release create $tag $zip --title "Cloudnest $tag" --notes $body --verify-tag
+          }
+          else {
+            # Recreate the nightly so the asset always matches the newest main.
+            $existing = gh release view nightly --json tagName 2>&1
+            if ($LASTEXITCODE -eq 0) {
+              gh release delete nightly --yes --cleanup-tag
+            }
+            gh release create nightly $zip --title "Cloudnest nightly" --prerelease `
+              --target $env:GITHUB_SHA --notes $body
+          }

@@ -72,9 +72,22 @@ jobs:
       - name: Build application
         run: wails3 build
 
-      - name: Upload build artifact
+      # The ZIP is what users actually download, so build it on every run and
+      # not only when a release is published.
+      - name: Package portable ZIP
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -Version "ci-$($env:GITHUB_SHA.Substring(0,7))" -SkipBuild
+
+      - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
           name: cloudnest-windows-amd64
           path: bin/cloudnest.exe
+          if-no-files-found: error
+
+      - name: Upload portable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudnest-portable-windows-amd64
+          path: dist/Cloudnest-*-win64.zip
           if-no-files-found: error
