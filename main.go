@@ -8,10 +8,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
 
+	"cloudnest/internal/dto"
 	"cloudnest/internal/engine"
 	"cloudnest/internal/platform"
 	"cloudnest/internal/settings"
@@ -90,11 +92,24 @@ func main() {
 	})
 	services.AttachApp(svc, app)
 
-	// Fit the default window to the primary display's work area. On high-DPI
-	// laptops the logical desktop can be smaller than 1280x820.
+	// Window geometry: reuse the saved size when it still fits the primary
+	// display, otherwise fall back to 1280x820. The saved position is only
+	// trusted when it still lands on this screen, so a monitor change cannot
+	// leave the window off-screen.
+	minWidth, minHeight := 1080, 720
 	width, height := 1280, 820
+	startX, startY := 0, 0
+	restorePos := false
 	if screen := app.Screen.GetPrimary(); screen != nil {
 		if wa := screen.WorkArea; wa.Width > 0 && wa.Height > 0 {
+			if saved := prefs.Window; saved.Width >= minWidth && saved.Height >= minHeight {
+				width, height = saved.Width, saved.Height
+				if saved.X >= wa.X && saved.Y >= wa.Y &&
+					saved.X < wa.X+wa.Width-200 && saved.Y < wa.Y+wa.Height-120 {
+					startX, startY = saved.X, saved.Y
+					restorePos = true
+				}
+			}
 			if width > wa.Width-40 {
 				width = wa.Width - 40
 			}
@@ -103,7 +118,6 @@ func main() {
 			}
 		}
 	}
-	minWidth, minHeight := 1080, 720
 	if minWidth > width {
 		minWidth = width
 	}
@@ -123,15 +137,45 @@ func main() {
 		URL:              "/",
 		EnableFileDrop:   true,
 	})
+	if restorePos {
+		mainWindow.SetPosition(startX, startY)
+	}
+
+	// Remember the geometry. Saving on every resize would rewrite settings.json
+	// continuously, so the write is debounced and also flushed when closing.
+	var geometryTimer *time.Timer
+	saveGeometry := func() {
+		if w, ok := app.Window.GetByName("main"); ok {
+			wd, ht := w.Size()
+			x, y := w.Position()
+			if wd > 0 && ht > 0 {
+				_ = store.Update(func(cur *dto.Settings) {
+					cur.Window.Width = wd
+					cur.Window.Height = ht
+					cur.Window.X = x
+					cur.Window.Y = y
+				})
+			}
+		}
+	}
+	debounceGeometry := func() {
+		if geometryTimer != nil {
+			geometryTimer.Stop()
+		}
+		geometryTimer = time.AfterFunc(time.Second, saveGeometry)
+	}
+	mainWindow.OnWindowEvent(events.Common.WindowDidResize, func(*application.WindowEvent) { debounceGeometry() })
+	mainWindow.OnWindowEvent(events.Common.WindowDidMove, func(*application.WindowEvent) { debounceGeometry() })
 
 	// Closing during a transfer asks first: the transfers are stopped either
 	// way, but nobody loses a backup by accident.
 	mainWindow.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
-		if services.CloseConfirmed(svc) || services.ActiveTransfers(svc) == 0 {
+		if !services.CloseConfirmed(svc) && services.ActiveTransfers(svc) > 0 {
+			e.Cancel()
+			app.Event.Emit("cloudnest:close-requested")
 			return
 		}
-		e.Cancel()
-		app.Event.Emit("cloudnest:close-requested")
+		saveGeometry()
 	})
 
 	// Dropped files carry real filesystem paths only on the Go side, so the
