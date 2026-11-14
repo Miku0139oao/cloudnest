@@ -25,6 +25,11 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// The tray icon is the same mark the installer uses.
+//
+//go:embed build/appicon.png
+var trayIcon []byte
+
 // instanceID identifies this application for the single-instance lock. It is a
 // variable so a smoke-test build can run next to an installed copy
 // (-ldflags "-X main.instanceID=...").
@@ -188,9 +193,17 @@ func main() {
 	// Closing during a transfer asks first: the transfers are stopped either
 	// way, but nobody loses a backup by accident.
 	mainWindow.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
+		logger.Info("window closing", "transfers", services.ActiveTransfers(svc), "schedule", store.Get().Schedule.Enabled, "confirmed", services.CloseConfirmed(svc))
 		if !services.CloseConfirmed(svc) && services.ActiveTransfers(svc) > 0 {
 			e.Cancel()
 			app.Event.Emit("cloudnest:close-requested")
+			return
+		}
+		// With a schedule configured the window close hides to the tray, so
+		// the daily backup still runs. The tray menu offers a real quit.
+		if !services.CloseConfirmed(svc) && store.Get().Schedule.Enabled {
+			e.Cancel()
+			mainWindow.Hide()
 			return
 		}
 		saveGeometry()
@@ -215,6 +228,26 @@ func main() {
 		}
 		app.Event.Emit("cloudnest:files-dropped", payload)
 	})
+
+	// Tray icon: the window can be closed while the app keeps running in the
+	// background, which is what makes scheduled backups useful.
+	tray := app.SystemTray.New()
+	tray.SetIcon(trayIcon)
+	tray.SetTooltip("雲栖 Cloudnest")
+	trayMenu := application.NewMenu()
+	trayMenu.Add("開啟雲栖 Cloudnest").OnClick(func(*application.Context) {
+		if w, ok := app.Window.GetByName("main"); ok {
+			w.Show()
+			w.Restore()
+			w.Focus()
+		}
+	})
+	trayMenu.AddSeparator()
+	trayMenu.Add("離開 Cloudnest").OnClick(func(*application.Context) {
+		services.AllowClose(svc)
+		app.Quit()
+	})
+	tray.SetMenu(trayMenu)
 
 	// Scheduled backups only run while the app is open; the goroutine stops
 	// with the process.
