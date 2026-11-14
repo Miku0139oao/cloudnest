@@ -69,16 +69,16 @@
     <div class="quick-grid">
       <button class="card tonal quick-card" onclick={() => app.go('files')}>
         <span class="qq"><Icon name="cloud-download" size={22} /></span>
-        <span class="grow" style="text-align:left">
-          <span class="qt">{t('home.quick.download')}</span><br />
+        <span class="grow qtext">
+          <span class="qt">{t('home.quick.download')}</span>
           <span class="qs">{t('home.quick.downloadSub')}</span>
         </span>
         <span class="go"><Icon name="chevron-right" size={20} /></span>
       </button>
       <button class="card tonal quick-card" onclick={() => app.go('clouds')}>
         <span class="qq"><Icon name="add-circle" size={22} /></span>
-        <span class="grow" style="text-align:left">
-          <span class="qt">{t('home.quick.accounts')}</span><br />
+        <span class="grow qtext">
+          <span class="qt">{t('home.quick.accounts')}</span>
           <span class="qs">{t('home.quick.accountsSub')}</span>
         </span>
         <span class="go"><Icon name="chevron-right" size={20} /></span>

@@ -18,8 +18,40 @@
   let error = $state('');
   let session = '';
   let timer: ReturnType<typeof setInterval> | undefined;
+  let watch: ReturnType<typeof setInterval> | undefined;
+  // Remote names present before this flow started. A new one means rclone has
+  // already saved the token, even if the poll has not caught up yet.
+  let known = new Set<string>();
+  let seeded = false;
 
   const waiting = $derived(phase === 'waiting');
+
+  async function seedKnown(): Promise<void> {
+    const res = await backend.listAccounts();
+    if (res?.items) {
+      known = new Set(res.items.map((a) => a.id));
+      seeded = true;
+    }
+  }
+
+  async function accountAppeared(): Promise<boolean> {
+    if (!seeded) return false;
+    const res = await backend.listAccounts();
+    if (!res?.items) return false;
+    const fresh = res.items.find((a) => !known.has(a.id));
+    if (!fresh) return false;
+    known.add(fresh.id);
+    return true;
+  }
+
+  async function succeed(): Promise<void> {
+    if (phase === 'done') return;
+    phase = 'done';
+    clearInterval(timer);
+    clearInterval(watch);
+    await refreshAccounts();
+    setTimeout(() => app.go('clouds'), 1000);
+  }
 
   async function start(): Promise<void> {
     if (!isWails) {
@@ -28,6 +60,7 @@
     }
     phase = 'starting';
     error = '';
+    await seedKnown();
     const res = await backend.beginConnect(provider.id, '');
     if (!res) {
       phase = 'failed';
@@ -44,25 +77,24 @@
   }
 
   async function poll(): Promise<void> {
-    if (!session) return;
+    if (!session || phase === 'done') return;
     const st = await backend.connectState(session);
     if (!st) return;
     authUrl = st.authUrl ?? '';
     if (st.state === 'waiting' || st.state === 'awaiting_url' || st.state === 'preparing') {
       phase = 'waiting';
     } else if (st.state === 'done') {
-      phase = 'done';
-      clearInterval(timer);
-      await refreshAccounts();
-      setTimeout(() => app.go('clouds'), 1000);
+      await succeed();
     } else if (st.state === 'failed') {
       phase = 'failed';
       error = st.err?.detail || st.err?.message || 'sign-in failed';
       clearInterval(timer);
+      clearInterval(watch);
     } else if (st.state === 'cancelled') {
       phase = 'failed';
       error = '';
       clearInterval(timer);
+      clearInterval(watch);
     }
   }
 
@@ -70,15 +102,21 @@
     if (app.params.session) {
       session = app.params.session;
       phase = 'waiting';
-      poll();
+      seedKnown().then(poll);
     } else {
       start();
     }
     timer = setInterval(poll, 700);
+    // The provider's token is saved as soon as rclone exits; watching the
+    // account list makes the sheet finish even if a poll is missed.
+    watch = setInterval(async () => {
+      if (phase === 'waiting' && (await accountAppeared())) await succeed();
+    }, 1200);
   });
 
   onDestroy(() => {
     if (timer) clearInterval(timer);
+    if (watch) clearInterval(watch);
     if (session && phase !== 'done' && isWails) backend.cancelConnect(session);
   });
 

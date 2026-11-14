@@ -61,12 +61,16 @@ html[data-theme="dark"] .hero {
 
 .quick-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
 .quick-card {
-  height: 100px;
+  /* min-height, not a fixed height: at 125%/150% scaling the two text lines
+     need more room than 100 CSS px and a fixed height clipped them. */
+  min-height: 100px;
   padding: 18px 20px;
   display: flex;
   align-items: center;
   gap: 16px;
+  text-align: left;
 }
+.quick-card .qtext { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .quick-card .qq {
   width: 44px; height: 44px; border-radius: 12px; flex: none;
   display: grid; place-items: center;
