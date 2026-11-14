@@ -177,7 +177,7 @@
                 </div>
                 <div class="hs">
                   {#if h.state === 'failed'}
-                    {t('activity.failedTitle', { n: h.failed ?? 0 })} · {fmtTime(h.time)}
+                    {h.failed ? t('activity.failedTitle', { n: h.failed }) : t('activity.failedGeneric')} · {fmtTime(h.time)}
                   {:else}
                     {fmtTime(h.time)} · {fmtBytes(h.size)} · {t('files.count', { n: (h.files ?? 0).toLocaleString('en-US') })}
                   {/if}

@@ -85,6 +85,8 @@ export interface JobView {
   split?: boolean;
   partsDone?: number;
   partsTotal?: number;
+  /** rclone's message when the job failed. */
+  error?: string;
 }
 
 export const data = $state({

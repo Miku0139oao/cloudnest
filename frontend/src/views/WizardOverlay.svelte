@@ -21,6 +21,7 @@
 
   let liveJob = $state<JobView | null>(null);
   let completed = $state(false);
+  let finishError = $state('');
   let showDeletions = $state(false);
   let folderPicker = $state(false);
 
@@ -225,15 +226,36 @@
       await refreshJobs();
       const found = data.jobs.find((j) => j.id === app.activeJobId);
       if (found) {
+        if (found.state === 'failed') {
+          // A failed job used to look identical to a finished one: the wizard
+          // showed "backup complete" because the job simply disappeared.
+          finishError = found.error || t('progress.failedUnknown');
+          liveJob = null;
+          refreshHistory();
+          return;
+        }
         liveJob = found;
       } else if (liveJob) {
-        completed = true;
         liveJob = null;
-        refreshHistory();
+        await refreshHistory();
+        const rec = data.history.find((r) => r.id === app.activeJobId);
+        if (rec?.state === 'failed') {
+          finishError = rec.error || t('progress.failedUnknown');
+        } else {
+          completed = true;
+        }
       }
     }, 1000);
     return () => clearInterval(timer);
   });
+
+  async function retryBackup(): Promise<void> {
+    if (!app.activeJobId) return;
+    finishError = '';
+    completed = false;
+    await backend.resumeJob(app.activeJobId);
+    await refreshJobs();
+  }
 
   function next(): void {
     app.go(`wizard/${Math.min(3, step + 1)}`);
@@ -292,6 +314,20 @@
               <div class="progress-line-1">{t('progress.done')}</div>
               <div class="progress-line-2">
                 {t('progress.doneSub', { files: src.files.toLocaleString('en-US') })}
+              </div>
+            </div>
+          {:else if finishError}
+            <div class="progress-view">
+              <div class="big-ring" style="display:grid;place-items:center;margin-bottom:14px">
+                <span class="onboard-mark" style="width:96px;height:96px;margin:0;background:var(--m3c-error-container);color:var(--m3c-on-error-container)">
+                  <Icon name="error" size={44} />
+                </span>
+              </div>
+              <div class="progress-line-1">{t('progress.failed')}</div>
+              <div class="progress-line-2">{t('progress.failedSub')}</div>
+              <div class="tech" style="margin-top:14px;text-align:left;width:100%">
+                <div class="tech-title">{t('activity.detail.tech')}</div>
+                <pre>{finishError}</pre>
               </div>
             </div>
           {:else}
@@ -527,6 +563,11 @@
         <div class="progress-actions">
           {#if completed}
             <button class="btn filled" onclick={() => app.closeOverlay()}>{t('common.done')}</button>
+          {:else if finishError}
+            <button class="btn text" onclick={() => app.closeOverlay()}>{t('common.close')}</button>
+            <button class="btn filled" onclick={retryBackup}>
+              <Icon name="refresh" size={18} /><span>{t('common.retry')}</span>
+            </button>
           {:else}
             <button class="btn tonal" onclick={togglePause}>
               <Icon name={jobPaused ? 'play' : 'pause'} size={18} />
