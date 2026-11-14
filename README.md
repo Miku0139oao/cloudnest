@@ -1,5 +1,7 @@
 # 雲栖 Cloudnest
 
+[![CI](https://github.com/Miku0139oao/cloudnest/actions/workflows/ci.yml/badge.svg)](https://github.com/Miku0139oao/cloudnest/actions/workflows/ci.yml)
+
 > 傻瓜式的 rclone 桌面 GUI。把電腦裡的檔案備份到雲端，不需要懂 rclone。
 >
 > A fool-proof desktop GUI for rclone. Back up your files without learning rclone.
