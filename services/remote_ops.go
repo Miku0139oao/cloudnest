@@ -290,7 +290,7 @@ func (s *Service) MoveLocal(paths []string, destDir string) dto.OpResult {
 func (s *Service) RenameLocal(path, newName string) dto.Empty {
 	name, f := normalizeFileName(newName)
 	if f != nil {
-		s.logFail("rename local", f)
+		return s.logFail("rename local", f)
 	}
 	src := strings.TrimSpace(path)
 	if src == "" {
@@ -430,7 +430,7 @@ func (s *Service) ShareLink(accountID, path string) dto.ShareResult {
 func (s *Service) CleanupTrash(accountID string) dto.Empty {
 	fs, err := accountFS(accountID)
 	if err != nil {
-		s.logFail("cleanup trash", failFrom(err))
+		return s.logFail("cleanup trash", failFrom(err))
 	}
 	c, f := s.client()
 	if f != nil {
@@ -441,14 +441,13 @@ func (s *Service) CleanupTrash(accountID string) dto.Empty {
 	if err := c.Cleanup(ctx, fs, ""); err != nil {
 		if unsupportedError(err) {
 			classified := apperr.Classify(0, err.Error())
-			s.logFail("cleanup trash", &dto.Fail{
+			return s.logFail("cleanup trash", &dto.Fail{
 				Code:    string(apperr.ProviderUnsupported),
 				Message: "this cloud does not support emptying trash",
 				Detail:  classified.Detail,
 			})
-		} else {
-			s.logFail("cleanup trash", failFrom(err))
 		}
+		return s.logFail("cleanup trash", failFrom(err))
 	}
 	return dto.Empty{}
 }
