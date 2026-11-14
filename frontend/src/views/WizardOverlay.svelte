@@ -24,6 +24,28 @@
   let finishError = $state('');
   let showDeletions = $state(false);
   let folderPicker = $state(false);
+  let verifying = $state(false);
+  let verifyResult = $state<{ differ: number; missing: number; examples?: string[] } | null>(null);
+
+  // Runs rclone check between the source folder and the destination folder of
+  // the backup that just finished.
+  async function verifyNow(): Promise<void> {
+    if (!isWails || app.sourcePaths.length === 0) return;
+    verifying = true;
+    const res = (await backend.verifyBackup(app.account, app.sourcePaths[0], app.destRoot)) as
+      | { differ?: number; missing?: number; examples?: string[]; err?: { message?: string; detail?: string } }
+      | null;
+    verifying = false;
+    if (!res || res.err) {
+      app.notify(res?.err?.detail || res?.err?.message || t('files.verify'));
+      return;
+    }
+    verifyResult = {
+      differ: res.differ ?? 0,
+      missing: res.missing ?? 0,
+      examples: res.examples ?? []
+    };
+  }
 
   // Backup preferences shown in the advanced panel. They are read-only here;
   // the Settings page owns them.
@@ -215,6 +237,7 @@
     }
     app.activeJobId = res.id;
     completed = false;
+    verifyResult = null;
     liveJob = null;
     app.go('wizard/progress');
   }
@@ -315,6 +338,28 @@
               <div class="progress-line-2">
                 {t('progress.doneSub', { files: src.files.toLocaleString('en-US') })}
               </div>
+              {#if verifyResult}
+                <div class="tech" style="margin-top:14px;text-align:left;width:100%">
+                  <div class="tech-title">{t('files.verifyTitle')}</div>
+                  {#if verifyResult.differ === 0 && verifyResult.missing === 0}
+                    <div>{t('files.verifySameBody')}</div>
+                  {:else}
+                    <div>{t('files.verifyDifferBody')}</div>
+                    <div class="nums" style="margin-top:6px">
+                      {t('files.differ')}: {verifyResult.differ} · {t('files.missing')}: {verifyResult.missing}
+                    </div>
+                    {#if verifyResult.examples?.length}
+                      <pre>{verifyResult.examples.slice(0, 5).join('\n')}</pre>
+                    {/if}
+                  {/if}
+                </div>
+              {:else}
+                <button class="btn tonal" style="margin-top:12px" disabled={verifying || !isWails}
+                  onclick={verifyNow}>
+                  <Icon name="verified" size={18} />
+                  <span>{verifying ? t('files.startVerify') : t('files.verify')}</span>
+                </button>
+              {/if}
             </div>
           {:else if finishError}
             <div class="progress-view">
