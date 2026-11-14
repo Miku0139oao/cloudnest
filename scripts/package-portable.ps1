@@ -93,9 +93,10 @@ $TargetExe = Join-Path $PackageDir 'Cloudnest.exe'
 Copy-Item -LiteralPath $SourceExe -Destination $TargetExe -Force
 Write-Host "Copied application to $TargetExe"
 
-# 3b. Sign the shipped executable. This happens after the copy so the build
-# output in bin\ stays exactly as the compiler produced it, and before zipping
-# so the published download carries the signature.
+# 3b. Sign the shipped executable. This happens after the copy so a failed
+# signature never leaves the ZIP half-signed, and before zipping so the
+# published download carries the signature. bin\cloudnest.exe is signed too,
+# which covers the CI artifact and anyone running the build output directly.
 if ($SkipSign) {
     Write-Host 'Skipping code signing because -SkipSign was specified.'
 }
@@ -109,7 +110,7 @@ else {
         if (-not $RequireSign -and $env:CLOUDNEST_REQUIRE_SIGN -eq '1') {
             $RequireSign = $true
         }
-        & $signScript -Files $TargetExe -Required:$RequireSign
+        & $signScript -Files $TargetExe, $SourceExe -Required:$RequireSign
     }
 }
 
