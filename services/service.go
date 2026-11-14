@@ -502,12 +502,22 @@ func (s *Service) ListCloud(accountID, path string) dto.Listing {
 	if fail != nil {
 		return dto.Listing{Path: path, Err: fail}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	remote := strings.Trim(path, "/")
 	started := time.Now()
 	s.log.Info("service: list cloud start", "account", accountID, "path", remote)
 	entries, err := c.List(ctx, accountID+":", remote, rc.ListOpt{})
+	if err != nil {
+		s.log.Warn("service: rc list failed, trying CLI", "account", accountID, "path", remote, "err", err)
+		if cliEntries, cliErr := s.listViaCLI(accountID, remote); cliErr == nil {
+			entries = cliEntries
+			err = nil
+			s.log.Info("service: cloud listed via CLI", "account", accountID, "path", remote, "entries", len(cliEntries), "took", time.Since(started).String())
+		} else {
+			s.log.Warn("service: CLI list failed", "err", cliErr)
+		}
+	}
 	if err != nil {
 		s.log.Warn("service: list cloud failed", "account", accountID, "path", remote, "err", err)
 		return dto.Listing{Path: path, Err: failFrom(err)}
