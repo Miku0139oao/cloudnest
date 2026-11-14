@@ -3,49 +3,76 @@
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
-import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wailsio/runtime";
+import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Create } from "@wailsio/runtime";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
 import * as dto$0 from "../internal/dto/models.js";
 
 export function AccountUsage(id: string): $CancellablePromise<dto$0.Usage> {
-    return $Call.ByID(4071873664, id);
+    return $Call.ByID(4071873664, id).then(($result: any) => {
+        return $$createType0($result);
+    });
 }
 
 export function ActiveJobs(): $CancellablePromise<dto$0.JobProgressList> {
-    return $Call.ByID(1463665948);
+    return $Call.ByID(1463665948).then(($result: any) => {
+        return $$createType1($result);
+    });
 }
 
 /**
  * ApplyBwLimit sets the rclone-wide bandwidth limit (e.g. "off", "1M").
  */
 export function ApplyBwLimit(rate: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(2516580956, rate);
+    return $Call.ByID(2516580956, rate).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 export function BeginConnect(provider: string, displayName: string): $CancellablePromise<dto$0.ConnectSession> {
-    return $Call.ByID(3111808683, provider, displayName);
+    return $Call.ByID(3111808683, provider, displayName).then(($result: any) => {
+        return $$createType3($result);
+    });
 }
 
 export function Bootstrap(): $CancellablePromise<dto$0.Bootstrap> {
-    return $Call.ByID(394016632);
+    return $Call.ByID(394016632).then(($result: any) => {
+        return $$createType4($result);
+    });
 }
 
 export function CancelConnect(id: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(78268230, id);
+    return $Call.ByID(78268230, id).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 export function CancelJob(id: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(2712195363, id);
+    return $Call.ByID(2712195363, id).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 export function ChooseFiles(title: string): $CancellablePromise<dto$0.PathPick> {
-    return $Call.ByID(962161882, title);
+    return $Call.ByID(962161882, title).then(($result: any) => {
+        return $$createType5($result);
+    });
 }
 
 export function ChooseFolder(title: string): $CancellablePromise<dto$0.PathPick> {
-    return $Call.ByID(601793047, title);
+    return $Call.ByID(601793047, title).then(($result: any) => {
+        return $$createType5($result);
+    });
+}
+
+/**
+ * CleanupTrash empties the backend's trash for the account.
+ */
+export function CleanupTrash(accountID: string): $CancellablePromise<dto$0.Empty> {
+    return $Call.ByID(3967858816, accountID).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 /**
@@ -53,22 +80,41 @@ export function ChooseFolder(title: string): $CancellablePromise<dto$0.PathPick>
  * the close as intentional and quits, so the window hook steps aside.
  */
 export function ConfirmClose(): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(2169334390);
+    return $Call.ByID(2169334390).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 export function ConnectState(id: string): $CancellablePromise<dto$0.ConnectProgress> {
-    return $Call.ByID(1417510581, id);
+    return $Call.ByID(1417510581, id).then(($result: any) => {
+        return $$createType6($result);
+    });
+}
+
+/**
+ * CopyCloud starts one asynchronous transfer per path. Files use copyfile and
+ * folders use sync/copy, all in one group so the Activity page can show and
+ * stop the whole batch together.
+ */
+export function CopyCloud(srcAccount: string, paths: string[], dstAccount: string, destDir: string): $CancellablePromise<dto$0.OpResult> {
+    return $Call.ByID(1021362124, srcAccount, paths, dstAccount, destDir).then(($result: any) => {
+        return $$createType7($result);
+    });
 }
 
 export function CreateFolder(accountID: string, path: string, name: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(3670060422, accountID, path, name);
+    return $Call.ByID(3670060422, accountID, path, name).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 /**
  * DebugLog lets the frontend write a line to the application log.
  */
 export function DebugLog(msg: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(553510257, msg);
+    return $Call.ByID(553510257, msg).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 /**
@@ -78,8 +124,19 @@ export function DebugLog(msg: string): $CancellablePromise<dto$0.Empty> {
  * a folder purge. Paths are relative to the account prefix, and values which
  * could escape it (a remote separator or "..") are rejected.
  */
-export function DeleteCloud(accountID: string, paths: string[] | null): $CancellablePromise<dto$0.DeleteResult> {
-    return $Call.ByID(1348662406, accountID, paths);
+export function DeleteCloud(accountID: string, paths: string[]): $CancellablePromise<dto$0.DeleteResult> {
+    return $Call.ByID(1348662406, accountID, paths).then(($result: any) => {
+        return $$createType8($result);
+    });
+}
+
+/**
+ * DismissResume drops an interrupted job the user does not want to resume.
+ */
+export function DismissResume(id: string): $CancellablePromise<dto$0.Empty> {
+    return $Call.ByID(3959763761, id).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 /**
@@ -87,20 +144,49 @@ export function DeleteCloud(accountID: string, paths: string[] | null): $Cancell
  * written to localDir/<basename>; a single file lands at localDir/<basename>.
  * The destination directory is created before any job starts.
  */
-export function Download(accountID: string, remotePaths: string[] | null, localDir: string): $CancellablePromise<dto$0.JobRef> {
-    return $Call.ByID(1600904658, accountID, remotePaths, localDir);
+export function Download(accountID: string, remotePaths: string[], localDir: string): $CancellablePromise<dto$0.JobRef> {
+    return $Call.ByID(1600904658, accountID, remotePaths, localDir).then(($result: any) => {
+        return $$createType9($result);
+    });
 }
 
 export function EngineStatus(): $CancellablePromise<dto$0.EngineStatus> {
-    return $Call.ByID(2901941338);
+    return $Call.ByID(2901941338).then(($result: any) => {
+        return $$createType10($result);
+    });
+}
+
+/**
+ * FileDetail returns metadata for one object plus the hashes the backend can
+ * provide. An unsupported MD5 is normal (many object stores only keep one
+ * checksum), so that failure is ignored.
+ */
+export function FileDetail(accountID: string, path: string): $CancellablePromise<dto$0.FileDetail> {
+    return $Call.ByID(300117813, accountID, path).then(($result: any) => {
+        return $$createType11($result);
+    });
+}
+
+/**
+ * FreeDriveLetters lists the drive letters from D: to Z: which are not in use.
+ * A: and B: are skipped because Windows reserves them for floppy drives.
+ */
+export function FreeDriveLetters(): $CancellablePromise<string[]> {
+    return $Call.ByID(1122396057).then(($result: any) => {
+        return $$createType12($result);
+    });
 }
 
 export function GetSettings(): $CancellablePromise<dto$0.Settings> {
-    return $Call.ByID(2035491227);
+    return $Call.ByID(2035491227).then(($result: any) => {
+        return $$createType13($result);
+    });
 }
 
 export function History(limit: number): $CancellablePromise<dto$0.RecordList> {
-    return $Call.ByID(1721703842, limit);
+    return $Call.ByID(1721703842, limit).then(($result: any) => {
+        return $$createType14($result);
+    });
 }
 
 /**
@@ -110,31 +196,55 @@ export function History(limit: number): $CancellablePromise<dto$0.RecordList> {
  * format). It never hashes part contents; sizes are compared to the manifest.
  */
 export function InspectSplit(accountID: string, partsPath: string): $CancellablePromise<dto$0.SplitInfo> {
-    return $Call.ByID(3748383902, accountID, partsPath);
+    return $Call.ByID(3748383902, accountID, partsPath).then(($result: any) => {
+        return $$createType15($result);
+    });
 }
 
 export function ListAccounts(): $CancellablePromise<dto$0.AccountList> {
-    return $Call.ByID(4129981430);
+    return $Call.ByID(4129981430).then(($result: any) => {
+        return $$createType16($result);
+    });
 }
 
 export function ListCloud(accountID: string, path: string): $CancellablePromise<dto$0.Listing> {
-    return $Call.ByID(3347746235, accountID, path);
+    return $Call.ByID(3347746235, accountID, path).then(($result: any) => {
+        return $$createType17($result);
+    });
 }
 
 export function ListLocal(path: string): $CancellablePromise<dto$0.Listing> {
-    return $Call.ByID(2828707269, path);
+    return $Call.ByID(2828707269, path).then(($result: any) => {
+        return $$createType17($result);
+    });
+}
+
+/**
+ * ListMounts returns the active mounts together with the WinFsp availability
+ * flag the UI needs to decide whether mounting is possible.
+ */
+export function ListMounts(): $CancellablePromise<dto$0.MountList> {
+    return $Call.ByID(3663262756).then(($result: any) => {
+        return $$createType18($result);
+    });
 }
 
 export function ListProviders(): $CancellablePromise<dto$0.ProviderCatalog> {
-    return $Call.ByID(2503888824);
+    return $Call.ByID(2503888824).then(($result: any) => {
+        return $$createType19($result);
+    });
 }
 
 export function ListRoots(): $CancellablePromise<dto$0.RootList> {
-    return $Call.ByID(3488537723);
+    return $Call.ByID(3488537723).then(($result: any) => {
+        return $$createType20($result);
+    });
 }
 
 export function MarkOnboarded(): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(2289508303);
+    return $Call.ByID(2289508303).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 /**
@@ -142,23 +252,72 @@ export function MarkOnboarded(): $CancellablePromise<dto$0.Empty> {
  * bounded so a huge tree cannot freeze the UI.
  */
 export function Measure(path: string): $CancellablePromise<dto$0.Measure> {
-    return $Call.ByID(2446567518, path);
+    return $Call.ByID(2446567518, path).then(($result: any) => {
+        return $$createType21($result);
+    });
+}
+
+/**
+ * MountCloud mounts one remote path as a Windows drive letter. driveLetter
+ * accepts "X", "X:" or "x". The remote path is relative to the account root.
+ */
+export function MountCloud(accountID: string, remotePath: string, driveLetter: string): $CancellablePromise<dto$0.Empty> {
+    return $Call.ByID(2361648232, accountID, remotePath, driveLetter).then(($result: any) => {
+        return $$createType2($result);
+    });
+}
+
+/**
+ * MoveCloud moves each path into destDir. Folders are reported as failed until
+ * a recursive move is implemented, rather than silently skipped.
+ */
+export function MoveCloud(accountID: string, paths: string[], destDir: string): $CancellablePromise<dto$0.OpResult> {
+    return $Call.ByID(3891109020, accountID, paths, destDir).then(($result: any) => {
+        return $$createType7($result);
+    });
+}
+
+/**
+ * MoveLocal moves local files or folders into destDir. A cross-volume rename
+ * cannot succeed on Windows, so it is rejected before os.Rename is attempted.
+ */
+export function MoveLocal(paths: string[], destDir: string): $CancellablePromise<dto$0.OpResult> {
+    return $Call.ByID(4278505374, paths, destDir).then(($result: any) => {
+        return $$createType7($result);
+    });
 }
 
 export function OpenConfigFolder(): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(3028414960);
+    return $Call.ByID(3028414960).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 export function OpenExternal(url: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(3316962113, url);
+    return $Call.ByID(3316962113, url).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 export function OpenLogFolder(): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(2791883780);
+    return $Call.ByID(2791883780).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 export function PauseJob(id: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(3384871207, id);
+    return $Call.ByID(3384871207, id).then(($result: any) => {
+        return $$createType2($result);
+    });
+}
+
+/**
+ * PendingResume lists interrupted jobs, newest first.
+ */
+export function PendingResume(): $CancellablePromise<dto$0.JournalEntry[]> {
+    return $Call.ByID(2484941674).then(($result: any) => {
+        return $$createType23($result);
+    });
 }
 
 /**
@@ -166,19 +325,46 @@ export function PauseJob(id: string): $CancellablePromise<dto$0.Empty> {
  * would be deleted. It never mutates anything.
  */
 export function Plan(req: dto$0.PlanRequest): $CancellablePromise<dto$0.PlanResult> {
-    return $Call.ByID(1729196425, req);
+    return $Call.ByID(1729196425, req).then(($result: any) => {
+        return $$createType24($result);
+    });
 }
 
 export function Quit(): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(454600297);
+    return $Call.ByID(454600297).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 export function RemoveAccount(id: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(1579347961, id);
+    return $Call.ByID(1579347961, id).then(($result: any) => {
+        return $$createType2($result);
+    });
+}
+
+/**
+ * RenameCloud renames one object inside its current folder (movefile with the
+ * same source and destination fs).
+ */
+export function RenameCloud(accountID: string, path: string, newName: string): $CancellablePromise<dto$0.Empty> {
+    return $Call.ByID(3642376005, accountID, path, newName).then(($result: any) => {
+        return $$createType2($result);
+    });
+}
+
+/**
+ * RenameLocal renames a local file or folder in place.
+ */
+export function RenameLocal(path: string, newName: string): $CancellablePromise<dto$0.Empty> {
+    return $Call.ByID(1711096567, path, newName).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 export function RestartEngine(): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(1243231131);
+    return $Call.ByID(1243231131).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 /**
@@ -187,7 +373,9 @@ export function RestartEngine(): $CancellablePromise<dto$0.Empty> {
  * Activity.
  */
 export function RestoreSplit(accountID: string, partsPath: string, destDir: string): $CancellablePromise<dto$0.JobRef> {
-    return $Call.ByID(3160178232, accountID, partsPath, destDir);
+    return $Call.ByID(3160178232, accountID, partsPath, destDir).then(($result: any) => {
+        return $$createType9($result);
+    });
 }
 
 /**
@@ -196,23 +384,64 @@ export function RestoreSplit(accountID: string, partsPath: string, destDir: stri
  * already been stopped and sync/copy skips files which are already present.
  */
 export function ResumeJob(id: string): $CancellablePromise<dto$0.JobRef> {
-    return $Call.ByID(4018894324, id);
+    return $Call.ByID(4018894324, id).then(($result: any) => {
+        return $$createType9($result);
+    });
 }
 
 export function SaveSettings($in: dto$0.Settings): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(3824942466, $in);
+    return $Call.ByID(3824942466, $in).then(($result: any) => {
+        return $$createType2($result);
+    });
+}
+
+/**
+ * SearchCloud recursively lists accountID and returns case-insensitive name or
+ * path matches. A split upload is reported once, as its parts directory, so the
+ * hundreds of part files do not fill the result list.
+ */
+export function SearchCloud(accountID: string, query: string): $CancellablePromise<dto$0.SearchResult> {
+    return $Call.ByID(3149666799, accountID, query).then(($result: any) => {
+        return $$createType25($result);
+    });
 }
 
 export function SetLanguage(lang: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(3006632000, lang);
+    return $Call.ByID(3006632000, lang).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 export function SetTheme(theme: string): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(2154786723, theme);
+    return $Call.ByID(2154786723, theme).then(($result: any) => {
+        return $$createType2($result);
+    });
+}
+
+/**
+ * ShareLink asks the backend for a public link. Backends without public-link
+ * support get a stable explanation instead of a generic provider error.
+ */
+export function ShareLink(accountID: string, path: string): $CancellablePromise<dto$0.ShareResult> {
+    return $Call.ByID(1678577997, accountID, path).then(($result: any) => {
+        return $$createType26($result);
+    });
 }
 
 export function StartBackup(req: dto$0.PlanRequest): $CancellablePromise<dto$0.JobRef> {
-    return $Call.ByID(2542103276, req);
+    return $Call.ByID(2542103276, req).then(($result: any) => {
+        return $$createType9($result);
+    });
+}
+
+/**
+ * UnmountCloud removes one active mount. A bare drive letter is normalised the
+ * same way as MountCloud.
+ */
+export function UnmountCloud(mountPoint: string): $CancellablePromise<dto$0.Empty> {
+    return $Call.ByID(618535459, mountPoint).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 /**
@@ -220,18 +449,67 @@ export function StartBackup(req: dto$0.PlanRequest): $CancellablePromise<dto$0.J
  * under destPath/<basename>; a single file is placed directly in destPath.
  * All jobs share a group and are registered as one upload job.
  */
-export function Upload(accountID: string, destPath: string, localPaths: string[] | null): $CancellablePromise<dto$0.JobRef> {
-    return $Call.ByID(4002902455, accountID, destPath, localPaths);
+export function Upload(accountID: string, destPath: string, localPaths: string[]): $CancellablePromise<dto$0.JobRef> {
+    return $Call.ByID(4002902455, accountID, destPath, localPaths).then(($result: any) => {
+        return $$createType9($result);
+    });
+}
+
+/**
+ * VerifyBackup compares a local backup source with its remote copy. The mapping
+ * mirrors the upload layout: a folder is stored under destRoot/<base>, a single
+ * file directly in destRoot.
+ */
+export function VerifyBackup(accountID: string, localPath: string, destRoot: string): $CancellablePromise<dto$0.CheckResult> {
+    return $Call.ByID(4162889273, accountID, localPath, destRoot).then(($result: any) => {
+        return $$createType27($result);
+    });
 }
 
 export function WindowClose(): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(2266239674);
+    return $Call.ByID(2266239674).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 export function WindowMinimise(): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(4069587571);
+    return $Call.ByID(4069587571).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 export function WindowToggleMaximise(): $CancellablePromise<dto$0.Empty> {
-    return $Call.ByID(3899068209);
+    return $Call.ByID(3899068209).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
+
+// Private type creation functions
+const $$createType0 = dto$0.Usage.createFrom;
+const $$createType1 = dto$0.JobProgressList.createFrom;
+const $$createType2 = dto$0.Empty.createFrom;
+const $$createType3 = dto$0.ConnectSession.createFrom;
+const $$createType4 = dto$0.Bootstrap.createFrom;
+const $$createType5 = dto$0.PathPick.createFrom;
+const $$createType6 = dto$0.ConnectProgress.createFrom;
+const $$createType7 = dto$0.OpResult.createFrom;
+const $$createType8 = dto$0.DeleteResult.createFrom;
+const $$createType9 = dto$0.JobRef.createFrom;
+const $$createType10 = dto$0.EngineStatus.createFrom;
+const $$createType11 = dto$0.FileDetail.createFrom;
+const $$createType12 = $Create.Array($Create.Any);
+const $$createType13 = dto$0.Settings.createFrom;
+const $$createType14 = dto$0.RecordList.createFrom;
+const $$createType15 = dto$0.SplitInfo.createFrom;
+const $$createType16 = dto$0.AccountList.createFrom;
+const $$createType17 = dto$0.Listing.createFrom;
+const $$createType18 = dto$0.MountList.createFrom;
+const $$createType19 = dto$0.ProviderCatalog.createFrom;
+const $$createType20 = dto$0.RootList.createFrom;
+const $$createType21 = dto$0.Measure.createFrom;
+const $$createType22 = dto$0.JournalEntry.createFrom;
+const $$createType23 = $Create.Array($$createType22);
+const $$createType24 = dto$0.PlanResult.createFrom;
+const $$createType25 = dto$0.SearchResult.createFrom;
+const $$createType26 = dto$0.ShareResult.createFrom;
+const $$createType27 = dto$0.CheckResult.createFrom;

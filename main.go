@@ -216,6 +216,12 @@ func main() {
 		app.Event.Emit("cloudnest:files-dropped", payload)
 	})
 
+	// Scheduled backups only run while the app is open; the goroutine stops
+	// with the process.
+	schedCtx, schedCancel := context.WithCancel(context.Background())
+	defer schedCancel()
+	go services.StartScheduler(svc, schedCtx)
+
 	go func() {
 		if err := eng.Start(ctx); err != nil {
 			logger.Error("engine start", "err", err)
