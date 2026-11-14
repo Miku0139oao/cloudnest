@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -64,6 +65,9 @@ type Manager struct {
 	rclonePath string
 	create     CreateRemoteFunc
 	openURL    func(string) error
+	// logf receives plain state transitions so a failed sign-in can be
+	// diagnosed from cloudnest.log. It may be nil.
+	logf func(string, ...any)
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -71,6 +75,10 @@ type Manager struct {
 }
 
 var ErrBusy = errors.New("oauth: another sign-in is already running")
+
+// ErrPortBusy is returned when rclone's fixed callback port is already taken,
+// usually by a sign-in process left over from an earlier attempt.
+var ErrPortBusy = errors.New("oauth: the sign-in port 53682 is already in use")
 
 var urlRE = regexp.MustCompile(`https?://[^\s"]+`)
 
@@ -80,6 +88,22 @@ func New(rclonePath string, create CreateRemoteFunc) *Manager {
 		create:     create,
 		openURL:    platform.OpenURL,
 		sessions:   make(map[string]*session),
+	}
+}
+
+// SetLogf installs a logger for sign-in diagnostics. Call it before Begin.
+func (m *Manager) SetLogf(fn func(string, ...any)) {
+	m.mu.Lock()
+	m.logf = fn
+	m.mu.Unlock()
+}
+
+func (m *Manager) log(format string, args ...any) {
+	m.mu.Lock()
+	fn := m.logf
+	m.mu.Unlock()
+	if fn != nil {
+		fn(format, args...)
 	}
 }
 
@@ -96,6 +120,12 @@ func (m *Manager) Begin(provider, name string) (string, error) {
 		}
 	}
 	id := randomID()
+	// rclone binds one fixed port for the browser callback. A leftover process
+	// from an earlier attempt would make this sign-in hang forever.
+	if err := probeCallbackPort(); err != nil {
+		return "", ErrPortBusy
+	}
+	m.log("oauth: begin provider=%s name=%s", provider, name)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	s := &session{id: id, provider: provider, name: name, state: Preparing, ctx: ctx, cancel: cancel}
 	m.sessions[id] = s
@@ -151,13 +181,16 @@ func (m *Manager) run(s *session, stdout io.ReadCloser, stderr io.ReadCloser) {
 				s.url = u
 				s.state = Waiting
 				m.mu.Unlock()
+				m.log("oauth: authorization url ready")
 				_ = m.openURL(u)
 			}
 		}
 	}
 
-	waitErr := s.cmd.Wait()
+	// Both pipes must be drained before Wait: Wait closes them, and a token
+	// still sitting in the stdout pipe would otherwise be lost.
 	<-outDone
+	waitErr := s.cmd.Wait()
 
 	m.mu.Lock()
 	if s.state == Cancelled {
@@ -165,23 +198,26 @@ func (m *Manager) run(s *session, stdout io.ReadCloser, stderr io.ReadCloser) {
 		m.finish(s)
 		return
 	}
-	if waitErr != nil {
+	m.mu.Unlock()
+
+	// Some providers print the token and then exit non-zero; a token is what
+	// actually matters, so it is checked first.
+	token := extractToken(outBuf.String())
+	if token == "" {
+		msg := "sign-in finished but rclone did not return a token"
+		if waitErr != nil {
+			msg = joinTail(tail, waitErr)
+		}
+		m.mu.Lock()
 		s.state = Failed
-		s.err = joinTail(tail, waitErr)
+		s.err = msg
 		m.mu.Unlock()
+		m.log("oauth: failed: %s", msg)
 		m.finish(s)
 		return
 	}
-	m.mu.Unlock()
-
-	token := extractToken(outBuf.String())
-	if token == "" {
-		m.mu.Lock()
-		s.state = Failed
-		s.err = "sign-in finished but rclone did not return a token"
-		m.mu.Unlock()
-		m.finish(s)
-		return
+	if waitErr != nil {
+		m.log("oauth: rclone exited with %v after returning a token", waitErr)
 	}
 
 	// Persist the token. This is a short synchronous call.
@@ -190,6 +226,7 @@ func (m *Manager) run(s *session, stdout io.ReadCloser, stderr io.ReadCloser) {
 		s.state = Failed
 		s.err = err.Error()
 		m.mu.Unlock()
+		m.log("oauth: saving the token failed: %v", err)
 		m.finish(s)
 		return
 	}
@@ -197,6 +234,7 @@ func (m *Manager) run(s *session, stdout io.ReadCloser, stderr io.ReadCloser) {
 	s.state = Done
 	s.message = "connected"
 	m.mu.Unlock()
+	m.log("oauth: connected provider=%s name=%s", s.provider, s.name)
 	m.finish(s)
 }
 
@@ -264,6 +302,17 @@ func joinTail(lines []string, err error) string {
 		msg = err.Error()
 	}
 	return msg
+}
+
+// probeCallbackPort reports whether rclone can still bind its fixed OAuth
+// callback port. A leftover authorize process would otherwise leave the new
+// sign-in waiting forever with no visible error.
+func probeCallbackPort() error {
+	ln, err := net.Listen("tcp", "127.0.0.1:53682")
+	if err != nil {
+		return err
+	}
+	return ln.Close()
 }
 
 func randomID() string {
