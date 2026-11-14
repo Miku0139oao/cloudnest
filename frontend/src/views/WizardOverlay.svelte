@@ -19,12 +19,56 @@
 
   let liveJob = $state<JobView | null>(null);
   let completed = $state(false);
+  let showDeletions = $state(false);
+
+  interface PlanView {
+    files: number;
+    bytes: number;
+    estimated: boolean;
+    deleteCount: number;
+    deleteBytes: number;
+    deletions: { path: string; size: number }[];
+    warnings?: string[];
+  }
+  let plan = $state<PlanView | null>(null);
+  let planLoading = $state(false);
+
+  async function computePlan(): Promise<void> {
+    if (!isWails || app.sourcePaths.length === 0) return;
+    planLoading = true;
+    const res = (await backend.plan({
+      sourcePaths: app.sourcePaths,
+      accountId: app.account,
+      destRoot: app.destRoot,
+      mode: mirror ? 'mirror' : 'additive',
+      fastFiles: app.fastFiles,
+      transfers: 4
+    })) as { plan?: PlanView } | null;
+    plan = res?.plan ?? null;
+    planLoading = false;
+  }
+
+  $effect(() => {
+    const s = step;
+    const m = mirror;
+    const count = app.sourcePaths.length;
+    if (s !== 3 || !count || !isWails) return;
+    computePlan();
+  });
 
   const src = $derived({
-    name: app.sourceName || (app.lang === 'en' ? backupSource.nameEn : backupSource.name),
-    files: app.sourcePath ? app.sourceFiles : backupSource.files,
-    bytes: app.sourcePath ? app.sourceBytes : backupSource.bytes
+    name:
+      app.sourcePaths.length > 1
+        ? t('wizard.s1.fileCount', { n: app.sourcePaths.length })
+        : app.sourceName || (isWails ? '' : (app.lang === 'en' ? backupSource.nameEn : backupSource.name)),
+    files: app.sourcePaths.length ? app.sourceFiles : (isWails ? 0 : backupSource.files),
+    bytes: app.sourcePaths.length ? app.sourceBytes : (isWails ? 0 : backupSource.bytes)
   });
+
+  const summaryFiles = $derived(plan?.files ?? src.files);
+  const summaryBytes = $derived(plan?.bytes ?? src.bytes);
+  const summaryDeleteCount = $derived(plan?.deleteCount ?? 0);
+  const summaryDeleteBytes = $derived(plan?.deleteBytes ?? 0);
 
   const shown = $derived(
     liveJob
@@ -59,7 +103,7 @@
       if (!isWails) app.notify(t('wizard.s1.folder'));
       return;
     }
-    app.sourcePath = picked.path;
+    app.sourcePaths = [picked.path];
     app.sourceName = picked.path.split(/[\\/]/).filter(Boolean).pop() ?? picked.path;
     app.sourceChoice = 'folder';
     const m = await backend.measure(picked.path);
@@ -70,17 +114,45 @@
     }
   }
 
+  async function pickFiles(): Promise<void> {
+    const picked = await backend.chooseFiles(t('wizard.s1.files'));
+    if (!picked?.paths?.length) {
+      if (!isWails) app.notify(t('wizard.s1.files'));
+      return;
+    }
+    app.sourcePaths = picked.paths;
+    app.sourceChoice = 'files';
+    app.sourceName =
+      picked.paths.length === 1
+        ? (picked.paths[0].split(/[\\/]/).filter(Boolean).pop() ?? picked.paths[0])
+        : '';
+    let files = 0;
+    let bytes = 0;
+    let estimated = false;
+    for (const p of picked.paths) {
+      const m = await backend.measure(p);
+      if (m) {
+        files += m.files;
+        bytes += m.bytes;
+        estimated = estimated || m.estimated;
+      }
+    }
+    app.sourceFiles = files;
+    app.sourceBytes = bytes;
+    app.sourceEstimated = estimated;
+  }
+
   async function startBackup(): Promise<void> {
     if (!isWails) {
       app.go('wizard/progress');
       return;
     }
-    if (!app.sourcePath) {
+    if (app.sourcePaths.length === 0) {
       await pickSource();
-      if (!app.sourcePath) return;
+      if (app.sourcePaths.length === 0) return;
     }
     const res = await backend.startBackup({
-      sourcePaths: [app.sourcePath],
+      sourcePaths: app.sourcePaths,
       accountId: app.account,
       destRoot: app.destRoot,
       mode: mirror ? 'mirror' : 'additive',
@@ -206,7 +278,9 @@
               <span class="t">{t('wizard.s1.folder')}</span>
               <span class="d">{t('wizard.s1.folderSub')}</span>
             </label>
-            <label class="option big" class:selected={app.sourceChoice === 'files'}>
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+            <label class="option big" class:selected={app.sourceChoice === 'files'} onclick={pickFiles}>
               <input type="radio" name="wiz-source" checked={app.sourceChoice === 'files'}
                 onchange={() => (app.sourceChoice = 'files')} />
               <Icon name="description" size={26} />
@@ -218,7 +292,7 @@
           <div class="quick-locations">
             <span class="lbl">{t('wizard.s1.quick')}</span>
             {#each quick as [id, key, icon] (id)}
-              <button class="chip interactive" class:selected={id === 'downloads'}>
+              <button class="chip interactive" class:selected={id === 'downloads'} onclick={pickSource}>
                 <Icon name={icon} size={16} /><span>{t(key)}</span>
               </button>
             {/each}
@@ -227,16 +301,18 @@
           <div class="source-summary">
             <Icon name="folder" size={20} />
             <div class="sc">
-              <div class="sn">{src.name}</div>
-              <div class="ss">
-                {t('wizard.s1.count', {
-                  files: src.files.toLocaleString('en-US'),
-                  size: fmtBytes(src.bytes)
-                })}
-              </div>
+              <div class="sn">{src.name || t('wizard.s1.none')}</div>
+              {#if src.name}
+                <div class="ss">
+                  {t('wizard.s1.count', {
+                    files: src.files.toLocaleString('en-US'),
+                    size: fmtBytes(src.bytes)
+                  })}
+                </div>
+              {/if}
             </div>
             <button class="btn text sm" onclick={pickSource}>
-              {t('common.change')}
+              {src.name ? t('common.change') : t('wizard.s1.folder')}
             </button>
           </div>
         </div>
@@ -294,8 +370,8 @@
           <div class="summary-box">
             {t('wizard.s3.summary', {
               source: src.name,
-              files: src.files.toLocaleString('en-US'),
-              size: fmtBytes(src.bytes),
+              files: summaryFiles.toLocaleString('en-US'),
+              size: fmtBytes(summaryBytes),
               account: accountName(currentAccount, app.lang),
               dest: `${t('files.folder.backup')} / ${src.name}`
             })}
@@ -323,12 +399,29 @@
               <Icon name="warning" size={20} />
               <div class="grow">
                 <div class="wt">
-                  {t('wizard.s3.warnTitle', { files: '37', size: fmtBytes(412 * 1024 * 1024) })}
+                  {#if planLoading}
+                    {t('wizard.s3.calculating')}
+                  {:else}
+                    {t('wizard.s3.warnTitle', {
+                      files: summaryDeleteCount.toLocaleString('en-US'),
+                      size: fmtBytes(summaryDeleteBytes)
+                    })}
+                  {/if}
                 </div>
                 <button class="btn text sm" style="padding-left:0;color:inherit"
-                  onclick={() => app.notify(t('wizard.s3.warnView'))}>
+                  onclick={() => (showDeletions = !showDeletions)}>
                   {t('wizard.s3.warnView')}
                 </button>
+                {#if showDeletions && plan?.deletions?.length}
+                  <div style="max-height:150px;overflow:auto;margin:4px 0 8px;font:var(--type-body-s)">
+                    {#each plan.deletions.slice(0, 100) as d (d.path)}
+                      <div style="display:flex;justify-content:space-between;gap:12px;padding:2px 0">
+                        <span class="truncate">{d.path}</span>
+                        <span class="nums">{fmtBytes(d.size)}</span>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
                 <label class="checkline">
                   <input type="checkbox" bind:checked={app.mirrorChecked} />
                   <span>{t('wizard.s3.confirm')}</span>
@@ -402,7 +495,7 @@
           <button class="btn filled" autofocus onclick={next}>{t('common.next')}</button>
         {:else}
           <!-- svelte-ignore a11y_autofocus -->
-          <button class="btn filled" autofocus={!startDisabled} disabled={startDisabled}
+          <button class="btn filled" autofocus={!startDisabled} disabled={startDisabled || (mirror && planLoading)}
             onclick={startBackup}>
             <Icon name="cloud-upload" size={18} /><span>{t('wizard.s3.start')}</span>
           </button>

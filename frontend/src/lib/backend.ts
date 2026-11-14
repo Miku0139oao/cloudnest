@@ -37,11 +37,19 @@ export const backend = {
   listCloud: (account: string, path: string) => safe(() => Service.ListCloud(account, path)),
   createFolder: (account: string, path: string, name: string) =>
     safe(() => Service.CreateFolder(account, path, name)),
+  deleteCloud: (account: string, paths: string[]) => safe(() => Service.DeleteCloud(account, paths)),
+  upload: (account: string, dest: string, paths: string[]) => safe(() => Service.Upload(account, dest, paths)),
+  download: (account: string, paths: string[], dest: string) => safe(() => Service.Download(account, paths, dest)),
+  inspectSplit: (account: string, path: string) => safe(() => Service.InspectSplit(account, path)),
+  restoreSplit: (account: string, partsPath: string, dest: string) =>
+    safe(() => Service.RestoreSplit(account, partsPath, dest)),
 
   startBackup: (req: DTO.PlanRequest) => safe(() => Service.StartBackup(req)),
+  plan: (req: DTO.PlanRequest) => safe(() => Service.Plan(req)),
   activeJobs: () => safe(() => Service.ActiveJobs()),
   history: (limit = 30) => safe(() => Service.History(limit)),
   pauseJob: (id: string) => safe(() => Service.PauseJob(id)),
+  resumeJob: (id: string) => safe(() => Service.ResumeJob(id)),
   cancelJob: (id: string) => safe(() => Service.CancelJob(id)),
 
   getSettings: () => safe(() => Service.GetSettings()),

@@ -1,7 +1,7 @@
 // Reactive application data. Seeds from mock fixtures so the UI is complete
 // in a plain browser, then replaces them with live rclone data in Wails.
 import * as mock from './mock';
-import { backend } from './backend';
+import { backend, isWails } from './backend';
 import type { Account, Entry, HistoryItem, ProviderId, ProviderInfo } from './mock';
 
 const knownProviders: ProviderId[] = [
@@ -58,6 +58,7 @@ function mapEntry(e: {
   return {
     id: e.path || e.name,
     name: e.name,
+    path: e.path,
     dir: e.isDir,
     kind: kindOf(e.name, e.mime),
     size: e.size,
@@ -71,6 +72,7 @@ function mapEntry(e: {
 
 export interface JobView {
   id: string;
+  kind: string;
   state: string;
   title?: string;
   current?: string;
@@ -86,16 +88,19 @@ export interface JobView {
 }
 
 export const data = $state({
-  accounts: mock.accounts as Account[],
-  localFiles: mock.localFiles as Entry[],
-  cloudFiles: mock.cloudFiles as Entry[],
-  history: mock.history as HistoryItem[],
+  // In the real app the UI starts empty and fills from rclone. Fixtures are
+  // only used by the browser preview (npm run dev without Wails).
+  accounts: (isWails ? [] : mock.accounts) as Account[],
+  localFiles: (isWails ? [] : mock.localFiles) as Entry[],
+  cloudFiles: (isWails ? [] : mock.cloudFiles) as Entry[],
+  history: (isWails ? [] : mock.history) as HistoryItem[],
   providers: mock.providers as ProviderInfo[],
   jobs: [] as JobView[],
   engine: { state: 'starting', version: '', message: '' },
   ready: false,
-  live: false,
+  live: isWails,
   localPath: '',
+  localRoot: '',
   cloudPath: '',
   activeAccount: '',
   cloudLoading: false,
@@ -124,6 +129,7 @@ export async function refreshEngine(): Promise<void> {
   if (st.state === 'ready' && !data.ready) {
     data.ready = true;
     await refreshAccounts();
+    refreshHistory();
   }
 }
 
@@ -139,6 +145,7 @@ export async function boot(): Promise<void> {
   if (b.engine.state === 'ready') {
     data.ready = true;
     await refreshAccounts();
+    refreshHistory();
   }
 }
 
@@ -168,23 +175,48 @@ export async function refreshUsage(): Promise<void> {
   );
 }
 
+export async function refreshHistory(): Promise<void> {
+  const res = await backend.history(30);
+  if (!res || !res.items) return;
+  data.history = res.items.map((r) => ({
+    id: r.id,
+    kind: r.kind === 'restore' ? 'restore' : 'backup',
+    state: r.state === 'failed' ? 'failed' : r.state === 'cancelled' ? 'cancelled' : 'done',
+    source: r.title,
+    sourceEn: r.title,
+    name: r.title,
+    time: new Date((r.finishedAt || r.startedAt) * 1000),
+    files: r.files,
+    size: r.bytes,
+    failed: r.failed,
+    ok: Math.max(0, r.files - r.failed)
+  }));
+}
+
+let cloudSeq = 0;
+
 export async function refreshCloud(accountID: string, path: string): Promise<void> {
+  const seq = ++cloudSeq;
   data.cloudLoading = true;
   data.cloudError = '';
-  const res = await backend.listCloud(accountID, path);
-  data.cloudLoading = false;
-  if (!res) {
-    data.cloudError = 'backend';
-    return;
+  try {
+    const res = await backend.listCloud(accountID, path);
+    if (seq !== cloudSeq) return; // superseded by a newer request
+    if (!res) {
+      data.cloudError = 'backend';
+      return;
+    }
+    if (res.err) {
+      console.warn('[cloud]', res.err);
+      data.cloudError = res.err.message;
+      data.cloudFiles = [];
+      return;
+    }
+    data.cloudFiles = (res.entries ?? []).map(mapEntry);
+    data.cloudPath = path;
+  } finally {
+    if (seq === cloudSeq) data.cloudLoading = false;
   }
-  if (res.err) {
-    console.warn('[cloud]', res.err);
-    data.cloudError = res.err.message;
-    data.cloudFiles = [];
-    return;
-  }
-  data.cloudFiles = (res.entries ?? []).map(mapEntry);
-  data.cloudPath = path;
 }
 
 export async function refreshLocal(path: string): Promise<void> {
@@ -200,6 +232,7 @@ export async function refreshRoots(): Promise<string> {
   const res = await backend.listRoots();
   if (!res || !res.items?.length) return '';
   const downloads = res.items.find((r) => r.id === 'downloads') ?? res.items[0];
+  data.localRoot = downloads.path;
   data.localPath = downloads.path;
   await refreshLocal(downloads.path);
   return downloads.path;

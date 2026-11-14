@@ -1,9 +1,11 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import Icon from '$lib/components/Icon.svelte';
   import { app } from '$lib/state.svelte';
   import { t } from '$lib/i18n';
   import { appVersion, engineVersion } from '$lib/mock';
   import { data } from '$lib/data.svelte';
+  import { backend, type DTO } from '$lib/backend';
 
   type Section = 'general' | 'backup' | 'advanced' | 'about';
   let section = $state<Section>(app.advancedOpen ? 'advanced' : 'general');
@@ -14,16 +16,45 @@
   let proxy = $state(false);
   let verbose = $state(false);
 
+  onMount(async () => {
+    const s = await backend.getSettings();
+    if (!s) return;
+    transfers = s.backup?.transfers ?? 4;
+    autoRetry = s.backup?.autoRetry ?? true;
+    fastFiles = s.backup?.fastFiles ?? true;
+    proxy = s.advanced?.proxy ?? false;
+    verbose = s.advanced?.verbose ?? false;
+  });
+
+  function persist(): void {
+    const s: DTO.Settings = {
+      language: app.lang,
+      theme: app.theme,
+      onboarded: true,
+      backup: { transfers, bwLimit: 'off', autoRetry, fastFiles, partSizeMB: 256 },
+      advanced: { proxy, verbose, enginePath: '' },
+      window: { width: 0, height: 0, x: 0, y: 0 }
+    };
+    backend.saveSettings(s);
+    app.notify(t('settings.saved'));
+  }
+
+  function resetAll(): void {
+    transfers = 4;
+    autoRetry = true;
+    fastFiles = true;
+    proxy = false;
+    verbose = false;
+    app.fastFiles = true;
+    persist();
+  }
+
   const nav: { id: Section; key: string; icon: string }[] = [
     { id: 'general', key: 'settings.general', icon: 'settings' },
     { id: 'backup', key: 'settings.backup', icon: 'cloud-upload' },
     { id: 'advanced', key: 'settings.advanced', icon: 'shield' },
     { id: 'about', key: 'settings.about', icon: 'info' }
   ];
-
-  function saved(): void {
-    app.notify(t('settings.saved'));
-  }
 </script>
 
 <div class="settings">
@@ -80,11 +111,11 @@
               </div>
               <div class="sc">
                 <div class="stepper">
-                  <button aria-label="minus" onclick={() => { transfers = Math.max(1, transfers - 1); saved(); }}>
+                  <button aria-label="minus" onclick={() => { transfers = Math.max(1, transfers - 1); persist(); }}>
                     <Icon name="remove" size={18} />
                   </button>
                   <span class="value">{transfers}</span>
-                  <button aria-label="plus" onclick={() => { transfers = Math.min(8, transfers + 1); saved(); }}>
+                  <button aria-label="plus" onclick={() => { transfers = Math.min(8, transfers + 1); persist(); }}>
                     <Icon name="add" size={18} />
                   </button>
                 </div>
@@ -107,7 +138,7 @@
                 <div class="sd">{t('settings.retrySub')}</div>
               </div>
               <div class="sc">
-                <input type="checkbox" class="switch" role="switch" bind:checked={autoRetry} onchange={saved} />
+                <input type="checkbox" class="switch" role="switch" bind:checked={autoRetry} onchange={persist} />
               </div>
             </div>
             <div class="set-row">
@@ -117,7 +148,7 @@
               </div>
               <div class="sc">
                 <input type="checkbox" class="switch" role="switch" bind:checked={fastFiles}
-                  onchange={() => { app.fastFiles = fastFiles; saved(); }} />
+                  onchange={() => { app.fastFiles = fastFiles; persist(); }} />
               </div>
             </div>
             <div class="set-row">
@@ -153,14 +184,14 @@
                 <div class="st">{t('settings.proxy')}</div>
                 <div class="sd">{t('settings.proxySub')}</div>
               </div>
-              <div class="sc"><input type="checkbox" class="switch" role="switch" bind:checked={proxy} onchange={saved} /></div>
+              <div class="sc"><input type="checkbox" class="switch" role="switch" bind:checked={proxy} onchange={persist} /></div>
             </div>
             <div class="set-row">
               <div class="sl">
                 <div class="st">{t('settings.verbose')}</div>
                 <div class="sd">{t('settings.verboseSub')}</div>
               </div>
-              <div class="sc"><input type="checkbox" class="switch" role="switch" bind:checked={verbose} onchange={saved} /></div>
+              <div class="sc"><input type="checkbox" class="switch" role="switch" bind:checked={verbose} onchange={persist} /></div>
             </div>
             <div class="set-row danger">
               <div class="sl">
@@ -168,7 +199,7 @@
                 <div class="sd">{t('settings.resetSub')}</div>
               </div>
               <div class="sc">
-                <button class="btn text-danger sm" onclick={() => app.notify(t('settings.resetAction'))}>
+                <button class="btn text-danger sm" onclick={resetAll}>
                   {t('settings.resetAction')}
                 </button>
               </div>

@@ -20,6 +20,7 @@ export interface Account {
 export interface Entry {
   id: string;
   name: string;
+  path?: string;
   dir?: boolean;
   kind?: 'img' | 'vid' | 'aud' | 'pdf' | 'doc' | 'zip';
   size: number;

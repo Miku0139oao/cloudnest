@@ -50,18 +50,23 @@ class AppState {
   systemDark = $state(false);
 
   selCloud = $state(new Set<string>());
+  selLocal = $state(new Set<string>());
+  localRoot = $state('');
   mirrorMode = $state(false);
   mirrorChecked = $state(false);
   advancedOpen = $state(false);
   fastFiles = $state(true);
   sourceChoice = $state<'folder' | 'files'>('folder');
-  sourcePath = $state('');
+  sourcePaths = $state<string[]>([]);
   sourceName = $state('');
   sourceFiles = $state(0);
   sourceBytes = $state(0);
   sourceEstimated = $state(false);
   destRoot = $state('電腦備份');
   activeJobId = $state('');
+  restoreAccount = $state('');
+  restorePath = $state('');
+  restoreDest = $state('');
   account = $state('gdrive');
   paused = $state(false);
   splitView = $state(false);
@@ -164,6 +169,18 @@ class AppState {
     if (next.has(id)) next.delete(id);
     else next.add(id);
     this.selCloud = next;
+  }
+
+  toggleLocal(id: string): void {
+    const next = new Set(this.selLocal);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    this.selLocal = next;
+  }
+
+  clearSelection(): void {
+    this.selCloud = new Set();
+    this.selLocal = new Set();
   }
 
   notify(message: string): void {

@@ -97,6 +97,12 @@
           <button class="btn text sm" onclick={() => app.go('activity')}>{t('common.viewAll')}</button>
         </div>
         <div class="card recent" style="padding:6px">
+          {#if data.history.length === 0}
+            <div class="empty" style="padding:26px 16px 22px">
+              <div class="e-title">{t('activity.noHistory')}</div>
+              <div class="e-body">{t('home.recent.empty')}</div>
+            </div>
+          {/if}
           {#each data.history.slice(0, 3) as h (h.id)}
             <div class="recent-row" role="button" tabindex="0" onclick={() => app.go('activity')}
               onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); app.go('activity'); } }}>
