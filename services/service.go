@@ -168,7 +168,9 @@ func (s *Service) SaveSettings(in dto.Settings) dto.Empty {
 		in.Schedule.AccountID != prevSched.AccountID ||
 		in.Schedule.DestRoot != prevSched.DestRoot ||
 		!sameStrings(in.Schedule.SourcePaths, prevSched.SourcePaths) {
-		in.Schedule.LastRun = 0
+		// A schedule that was just configured must not fire immediately for a
+		// time that already passed today; the first run is the next point.
+		in.Schedule.LastRun = time.Now().Unix()
 	}
 
 	_ = s.store.Update(func(cur *dto.Settings) {
