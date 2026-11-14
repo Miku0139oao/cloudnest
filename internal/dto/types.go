@@ -179,8 +179,10 @@ type JobProgress struct {
 	TotalFiles  int     `json:"totalFiles"`
 	Failed      int     `json:"failedFiles"`
 	Split       bool    `json:"split"`
-	PartsDone   int     `json:"partsDone,omitempty"`
-	PartsTotal  int     `json:"partsTotal,omitempty"`
+	// Error is rclone's message when a job finished unsuccessfully.
+	Error      string `json:"error,omitempty"`
+	PartsDone  int    `json:"partsDone,omitempty"`
+	PartsTotal int    `json:"partsTotal,omitempty"`
 }
 
 type Snapshot struct {

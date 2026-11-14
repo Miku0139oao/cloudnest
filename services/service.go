@@ -46,9 +46,12 @@ type jobState struct {
 	ETA        *int64
 	Current    string
 	Failed     int
-	Sources    []string
-	DestRoot   string
-	AccountID  string
+	// Err holds rclone's message for a failed job so the UI can explain the
+	// failure instead of only counting it.
+	Err       string
+	Sources   []string
+	DestRoot  string
+	AccountID string
 }
 
 type usageEntry struct {
@@ -769,6 +772,27 @@ func (s *Service) StartBackup(req dto.PlanRequest) dto.JobRef {
 			}
 		}
 
+		if !st.IsDir() {
+			// rclone's sync/copy refuses a file as srcFs ("is a file not a
+			// directory"), which used to fail every single-file backup the
+			// moment it started. copyfile moves exactly one file and keeps
+			// its name.
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			copyJobID, err := c.StartCopyFile(ctx, rc.CopyFileIn{
+				SrcFs:     filepath.Dir(src),
+				SrcRemote: base,
+				DstFs:     req.AccountID + ":" + dest,
+				DstRemote: base,
+				Group:     group,
+			})
+			cancel()
+			if err != nil {
+				return dto.JobRef{Err: failFrom(err)}
+			}
+			job.JobIDs = append(job.JobIDs, copyJobID)
+			continue
+		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		jobID, err := c.StartSync(ctx, kind, rc.SyncIn{
 			SrcFs: src, DstFs: dstFs, Group: group, Transfers: transfers, Exclude: req.Excludes,
@@ -844,6 +868,7 @@ func (s *Service) ActiveJobs() dto.JobProgressList {
 		}
 		finished := true
 		success := true
+		jobErr := ""
 		if j.Kind != "restore" {
 			for _, id := range j.JobIDs {
 				js, err := c.JobStatus(ctx, id)
@@ -857,12 +882,16 @@ func (s *Service) ActiveJobs() dto.JobProgressList {
 				}
 				if !js.Success {
 					success = false
+					if jobErr == "" {
+						jobErr = js.Error
+					}
 				}
 			}
 			if finished {
 				j.State = "done"
 				if !success {
 					j.State = "failed"
+					j.Err = jobErr
 				}
 				s.finishJob(j)
 			}
@@ -874,7 +903,7 @@ func (s *Service) ActiveJobs() dto.JobProgressList {
 			ID: j.ID, Kind: j.Kind, State: j.State, Title: j.Title,
 			Current: j.Current, Bytes: j.Bytes, TotalBytes: j.TotalBytes,
 			Speed: j.Speed, ETA: j.ETA, TotalFiles: j.Files, Failed: j.Failed,
-			Phase: j.Phase,
+			Phase: j.Phase, Error: j.Err,
 		})
 	}
 	sort.Slice(out, func(i, k int) bool { return out[i].ID < out[k].ID })
@@ -946,7 +975,7 @@ func (s *Service) finishJob(j *jobState) {
 	rec := dto.Record{
 		ID: j.ID, Kind: j.Kind, State: state, Title: j.Title,
 		StartedAt: j.StartedAt.Unix(), FinishedAt: time.Now().Unix(),
-		Bytes: j.Bytes, Files: j.Files, Failed: j.Failed,
+		Bytes: j.Bytes, Files: j.Files, Failed: j.Failed, Error: j.Err,
 	}
 	s.records = append([]dto.Record{rec}, s.records...)
 	if len(s.records) > 50 {

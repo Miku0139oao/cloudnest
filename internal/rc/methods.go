@@ -95,6 +95,51 @@ type createRemoteRequest struct {
 	asyncControl
 }
 
+// StartCopyFile copies a single file with operations/copyfile and returns its
+// job id. The call is always asynchronous so one job id represents the
+// transfer, just like StartSync. It exists because sync/copy refuses a file as
+// srcFs ("is a file not a directory"), which is exactly the single-file backup
+// case.
+func (c *Client) StartCopyFile(ctx context.Context, in CopyFileIn) (int64, error) {
+	for name, value := range map[string]string{
+		"srcFs": in.SrcFs, "srcRemote": in.SrcRemote,
+		"dstFs": in.DstFs, "dstRemote": in.DstRemote,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return 0, fmt.Errorf("rc: CopyFile: %s is required", name)
+		}
+	}
+	group := in.Group
+	if group == "" {
+		group = "cloudnest-copy-" + randomID(8)
+	}
+	req := copyFileRequest{
+		SrcFs:        in.SrcFs,
+		SrcRemote:    in.SrcRemote,
+		DstFs:        in.DstFs,
+		DstRemote:    in.DstRemote,
+		asyncControl: newAsyncControl(true, group, nil),
+	}
+	var resp struct {
+		JobID int64 `json:"jobid"`
+	}
+	if err := c.Call(ctx, "operations/copyfile", req, &resp); err != nil {
+		return 0, err
+	}
+	if resp.JobID <= 0 {
+		return 0, errors.New("rclone did not return a job id")
+	}
+	return resp.JobID, nil
+}
+
+type copyFileRequest struct {
+	SrcFs     string `json:"srcFs"`
+	SrcRemote string `json:"srcRemote"`
+	DstFs     string `json:"dstFs"`
+	DstRemote string `json:"dstRemote"`
+	asyncControl
+}
+
 // UpdateRemote updates an existing remote with config/update.
 func (c *Client) UpdateRemote(ctx context.Context, name string, parameters map[string]any, opt *ConfigOpt) (*ConfigResult, error) {
 	if strings.TrimSpace(name) == "" {

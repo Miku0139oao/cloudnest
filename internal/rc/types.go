@@ -214,11 +214,16 @@ type Usage struct {
 }
 
 // CopyFileIn is the request body for operations/copyfile.
+//
+// Group is not part of the wire format: it only lets an asynchronous copy
+// join the backup's job group so one pause covers the whole transfer.
 type CopyFileIn struct {
 	SrcFs     string `json:"srcFs"`
 	SrcRemote string `json:"srcRemote"`
 	DstFs     string `json:"dstFs"`
 	DstRemote string `json:"dstRemote"`
+
+	Group string `json:"-"`
 }
 
 // ListOpt controls operations/list and operations/stat.

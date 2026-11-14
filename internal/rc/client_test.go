@@ -397,3 +397,36 @@ func TestCallRespectsContext(t *testing.T) {
 		t.Fatalf("error = %v, want deadline exceeded", err)
 	}
 }
+
+func TestStartCopyFileAsync(t *testing.T) {
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/operations/copyfile" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		if body["srcFs"] != "C:/src" || body["srcRemote"] != "a.zip" {
+			t.Errorf("source = %v / %v", body["srcFs"], body["srcRemote"])
+		}
+		if body["dstFs"] != "gdrive:backup" || body["dstRemote"] != "a.zip" {
+			t.Errorf("destination = %v / %v", body["dstFs"], body["dstRemote"])
+		}
+		if body["_async"] != true || body["_group"] != "gui-job-1" {
+			t.Errorf("async control = %v / %v", body["_async"], body["_group"])
+		}
+		io.WriteString(w, `{"jobid":11}`)
+	})
+
+	jobID, err := client.StartCopyFile(context.Background(), CopyFileIn{
+		SrcFs: "C:/src", SrcRemote: "a.zip",
+		DstFs: "gdrive:backup", DstRemote: "a.zip", Group: "gui-job-1",
+	})
+	if err != nil {
+		t.Fatalf("StartCopyFile: %v", err)
+	}
+	if jobID != 11 {
+		t.Fatalf("jobID = %d", jobID)
+	}
+}

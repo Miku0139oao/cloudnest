@@ -135,6 +135,11 @@ export interface JobProgress {
     "totalFiles": number;
     "failedFiles": number;
     "split": boolean;
+
+    /**
+     * Error is rclone's message when a job finished unsuccessfully.
+     */
+    "error"?: string;
     "partsDone"?: number;
     "partsTotal"?: number;
 }
