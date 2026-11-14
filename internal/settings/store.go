@@ -69,6 +69,9 @@ func merge(base, over dto.Settings) dto.Settings {
 		base.Backup.PartSizeMB = over.Backup.PartSizeMB
 	}
 	base.Advanced = over.Advanced
+	// The schedule is a plain struct whose zero value is meaningful, so it is
+	// taken as-is from the file instead of field-by-field.
+	base.Schedule = over.Schedule
 	if over.Window.Width > 0 && over.Window.Height > 0 {
 		base.Window = over.Window
 	}
