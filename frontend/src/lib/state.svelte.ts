@@ -157,6 +157,21 @@ class AppState {
     this.go(this.route);
   }
 
+  // applySaved restores the language and theme stored in settings.json. It is
+  // called after bootstrap; an explicit ?lang=/?theme= in the URL still wins,
+  // which keeps the preview links deterministic.
+  applySaved(lang: string, theme: ThemeSetting): void {
+    if (!this.params.lang && lang) {
+      this.lang = lang === 'en' ? 'en' : 'zh-Hant';
+      setLang(this.lang);
+      localStorage.setItem('cloudnest.lang', this.lang);
+    }
+    if (!this.params.theme && (theme === 'light' || theme === 'dark' || theme === 'system')) {
+      this.theme = theme;
+    }
+    this.applyChrome();
+  }
+
   setTheme(theme: ThemeSetting): void {
     this.theme = theme;
     this.applyChrome();

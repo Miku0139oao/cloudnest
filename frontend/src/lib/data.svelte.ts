@@ -141,6 +141,7 @@ export async function refreshEngine(): Promise<void> {
 export async function boot(): Promise<void> {
   const b = await backend.bootstrap();
   if (!b) return;
+  app.applySaved(b.language, b.theme as 'system' | 'light' | 'dark');
   applyEngine(b.engine);
   data.live = true;
   if (b.accounts?.length) {
