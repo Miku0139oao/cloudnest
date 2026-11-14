@@ -5,7 +5,8 @@
   import { app } from '$lib/state.svelte';
   import { t, fmtBytes, fmtTime } from '$lib/i18n';
   import { accountName } from '$lib/mock';
-  import { data, refreshUsage } from '$lib/data.svelte';
+  import { data, refreshUsage, refreshJobs } from '$lib/data.svelte';
+  import { backend, isWails } from '$lib/backend';
 
   onMount(() => {
     // Quota is nice-to-have; never let it contend with a file listing.
@@ -16,6 +17,22 @@
   });
 
   const n = $derived(data.accounts.length);
+
+  // rclone skips files that already arrived, so retrying a failed backup only
+  // transfers the remainder.
+  async function retry(id: string): Promise<void> {
+    if (!isWails) {
+      app.go('wizard/1');
+      return;
+    }
+    const res = await backend.resumeJob(id);
+    if (!res || res.err) {
+      app.notify(t('activity.retryGone'));
+      return;
+    }
+    await refreshJobs();
+    app.go('activity');
+  }
 </script>
 
 <div class="scroll">
@@ -134,7 +151,7 @@
                 </div>
               </div>
               {#if h.state === 'failed'}
-                <button class="btn text sm" onclick={(e) => { e.stopPropagation(); app.notify(t('common.retry') + '…'); }}>
+                <button class="btn text sm" onclick={(e) => { e.stopPropagation(); retry(h.id); }}>
                   {t('common.retry')}
                 </button>
               {/if}

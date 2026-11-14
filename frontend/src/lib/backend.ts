@@ -56,6 +56,7 @@ export const backend = {
   saveSettings: (s: DTO.Settings) => safe(() => Service.SaveSettings(s)),
   setLanguage: (lang: string) => safe(() => Service.SetLanguage(lang)),
   setTheme: (theme: string) => safe(() => Service.SetTheme(theme)),
+  applyBwLimit: (rate: string) => safe(() => Service.ApplyBwLimit(rate)),
   markOnboarded: () => safe(() => Service.MarkOnboarded()),
 
   chooseFolder: (title: string) => safe(() => Service.ChooseFolder(title)),

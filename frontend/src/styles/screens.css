@@ -713,3 +713,26 @@ html[data-theme="dark"] .engine-line .dot { box-shadow: 0 0 0 3px #1d4a2c; }
   padding: 4px 2px;
 }
 .privacy .i { width: 17px; height: 17px; margin-top: 1px; }
+
+/* History detail dialog */
+.detail-list { display: flex; flex-direction: column; gap: 2px; }
+.detail-list > div {
+  display: flex; justify-content: space-between; gap: 18px;
+  padding: 9px 2px; font: var(--type-body-s);
+  border-bottom: 1px solid color-mix(in srgb, var(--m3c-outline-variant) 45%, transparent);
+}
+.detail-list > div:last-child { border-bottom: 0; }
+.detail-list span { color: var(--m3c-on-surface-variant); }
+.detail-list b { font-weight: 500; text-align: right; }
+
+.tech {
+  margin-top: 14px; padding: 12px 14px; border-radius: 12px;
+  background: var(--m3c-surface-container-high);
+  font: var(--type-body-s);
+}
+.tech .tech-title { font-weight: 500; color: var(--m3c-on-surface-variant); margin-bottom: 6px; }
+.tech pre {
+  margin: 0; white-space: pre-wrap; word-break: break-word;
+  font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+  color: var(--m3c-on-surface-variant);
+}

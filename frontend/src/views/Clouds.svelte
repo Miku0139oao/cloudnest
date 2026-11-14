@@ -86,7 +86,7 @@
           <span class="bar"><i style={`width:${a.total > 0 ? Math.round((a.used / a.total) * 100) : 0}%`}></i></span>
           <div class="cc-foot">
             <span>{a.lastBackup ? t('clouds.lastBackup', { time: fmtTime(a.lastBackup) }) : t('clouds.neverBackedUp')}</span>
-            <button class="btn text sm" onclick={() => app.go('files')}>{t('clouds.browse')}</button>
+            <button class="btn text sm" onclick={() => { data.activeAccount = a.id; app.go('files'); }}>{t('clouds.browse')}</button>
           </div>
 
           <div id={`menu-${a.id}`} popover class="account-menu" style={`position-anchor:--acct-${a.id}`}>

@@ -40,6 +40,18 @@
     return parts[parts.length - 1] ?? path;
   }
 
+  const rootKeys: Record<string, string> = {
+    desktop: 'files.root.desktop',
+    documents: 'files.root.documents',
+    pictures: 'files.root.pictures',
+    downloads: 'files.root.downloads',
+    music: 'files.root.music'
+  };
+
+  function rootKey(id: string): string {
+    return rootKeys[id] ?? 'files.root.downloads';
+  }
+
   function fileIcon(e: Entry): { icon: string; cls: string } {
     if (e.dir) return { icon: 'folder', cls: '' };
     const map: Record<string, [string, string]> = {
@@ -226,9 +238,18 @@
         <button class="btn tonal sm" disabled={selectedLocal.length === 0 || busy} onclick={upload}>
           <Icon name="cloud-upload" size={16} /><span>{t('files.upload')}</span>
         </button>
-        {#each [['desktop', 'files.root.desktop'], ['documents', 'files.root.documents'], ['pictures', 'files.root.pictures'], ['downloads', 'files.root.downloads'], ['music', 'files.root.music']] as [id, key] (id)}
-          <button class="chip interactive" class:selected={id === 'downloads'}>{t(key)}</button>
-        {/each}
+        {#if data.roots.length}
+          {#each data.roots as r (r.id)}
+            <button class="chip interactive" class:selected={data.localPath === r.path}
+              onclick={() => { refreshLocal(r.path); app.clearSelection(); }}>
+              {t(rootKey(r.id))}
+            </button>
+          {/each}
+        {:else}
+          {#each [['desktop', 'files.root.desktop'], ['documents', 'files.root.documents'], ['pictures', 'files.root.pictures'], ['downloads', 'files.root.downloads'], ['music', 'files.root.music']] as [id, key] (id)}
+            <button class="chip interactive" class:selected={id === 'downloads'}>{t(key)}</button>
+          {/each}
+        {/if}
         <span class="spacer"></span>
         <button class="icon-button" aria-label={t('files.newFolder')} disabled={!account} onclick={() => (newFolderOpen = true)}>
           <Icon name="create-new-folder" size={20} />

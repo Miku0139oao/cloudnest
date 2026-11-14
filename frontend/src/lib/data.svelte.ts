@@ -106,7 +106,8 @@ export const data = $state({
   cloudLoading: false,
   cloudSlow: false,
   cloudError: '',
-  localLoading: false
+  localLoading: false,
+  roots: [] as { id: string; label: string; path: string }[]
 });
 
 export async function refreshJobs(): Promise<void> {
@@ -188,7 +189,8 @@ export async function refreshHistory(): Promise<void> {
     files: r.files,
     size: r.bytes,
     failed: r.failed,
-    ok: Math.max(0, r.files - r.failed)
+    ok: Math.max(0, r.files - r.failed),
+    error: r.error
   }));
 }
 
@@ -254,6 +256,7 @@ export async function refreshLocal(path: string): Promise<void> {
 export async function refreshRoots(): Promise<string> {
   const res = await backend.listRoots();
   if (!res || !res.items?.length) return '';
+  data.roots = res.items;
   const downloads = res.items.find((r) => r.id === 'downloads') ?? res.items[0];
   data.localRoot = downloads.path;
   data.localPath = downloads.path;

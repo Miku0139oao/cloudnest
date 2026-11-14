@@ -66,6 +66,8 @@ export interface HistoryItem {
   size: number;
   failed?: number;
   ok?: number;
+  /** Technical reason recorded when the job failed. */
+  error?: string;
 }
 
 const GB = 1024 ** 3;

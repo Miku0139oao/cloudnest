@@ -63,6 +63,9 @@ class AppState {
   sourceBytes = $state(0);
   sourceEstimated = $state(false);
   destRoot = $state('電腦備份');
+  /** Glob patterns the wizard must leave out of the backup. */
+  excludes = $state<string[]>([]);
+  excludesOpen = $state(false);
   activeJobId = $state('');
   restoreAccount = $state('');
   restorePath = $state('');

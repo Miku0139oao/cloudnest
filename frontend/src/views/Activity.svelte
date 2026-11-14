@@ -3,14 +3,16 @@
   import Icon from '$lib/components/Icon.svelte';
   import Ring from '$lib/components/Ring.svelte';
   import Spark from '$lib/components/Spark.svelte';
+  import Modal from '$lib/components/Modal.svelte';
   import { app } from '$lib/state.svelte';
   import { t, fmtBytes, fmtDuration, fmtTime } from '$lib/i18n';
-  import { accountName } from '$lib/mock';
+  import { accountName, type HistoryItem } from '$lib/mock';
   import { data, refreshJobs, refreshHistory } from '$lib/data.svelte';
-  import { backend } from '$lib/backend';
+  import { backend, isWails } from '$lib/backend';
 
   let tab = $state<'active' | 'history'>('active');
   let timer: ReturnType<typeof setInterval> | undefined;
+  let detail = $state<HistoryItem | null>(null);
 
   const active = $derived(data.jobs.filter((j) => j.state === 'running' || j.state === 'paused'));
   const accountLabel = $derived(data.accounts[0] ? accountName(data.accounts[0], app.lang) : '');
@@ -41,6 +43,23 @@
     await backend.cancelJob(id);
     await refreshJobs();
     refreshHistory();
+  }
+
+  // Retry re-runs the stored job spec. rclone only sends what is missing, so a
+  // failed backup picks up where it stopped.
+  async function retry(rec: HistoryItem): Promise<void> {
+    if (!isWails) {
+      app.go('wizard/1');
+      return;
+    }
+    const res = await backend.resumeJob(rec.id);
+    if (!res || res.err) {
+      app.notify(t('activity.retryGone'));
+      return;
+    }
+    tab = 'active';
+    await refreshJobs();
+    app.notify(t('activity.retryStarted'));
   }
 
   onMount(() => {
@@ -165,9 +184,9 @@
                 </div>
               </div>
               {#if h.state === 'failed'}
-                <button class="btn text sm" onclick={() => app.go('wizard/1')}>{t('activity.retry')}</button>
+                <button class="btn text sm" onclick={() => retry(h)}>{t('activity.retry')}</button>
               {:else}
-                <button class="btn text sm" onclick={() => app.notify(t('common.view'))}>{t('common.view')}</button>
+                <button class="btn text sm" onclick={() => (detail = h)}>{t('common.view')}</button>
               {/if}
             </div>
           {/each}
@@ -176,3 +195,40 @@
     {/if}
   </div>
 </div>
+
+{#if detail}
+  <Modal labelledby="hist-title" onclose={() => (detail = null)}>
+    <div class="dialog" style="width: 520px">
+      <div class="dialog-head" style="padding-bottom: 2px">
+        <div class="grow">
+          <div class="dialog-title" id="hist-title">{detail.name || detail.source}</div>
+        </div>
+        <button class="icon-button" aria-label={t('common.close')} onclick={() => (detail = null)}>
+          <Icon name="close" size={20} />
+        </button>
+      </div>
+      <div class="dialog-body">
+        <div class="detail-list">
+          <div><span>{t('activity.detail.kind')}</span><b>{detail.kind === 'restore' ? t('activity.detail.restore') : t('activity.detail.backup')}</b></div>
+          <div><span>{t('activity.detail.state')}</span><b>{t(`activity.detail.${detail.state}`)}</b></div>
+          <div><span>{t('activity.detail.time')}</span><b>{fmtTime(detail.time)}</b></div>
+          <div><span>{t('activity.detail.size')}</span><b>{fmtBytes(detail.size)}</b></div>
+          <div><span>{t('activity.detail.files')}</span><b>{(detail.files ?? 0).toLocaleString('en-US')}</b></div>
+          {#if detail.failed}
+            <div><span>{t('activity.detail.failedCount')}</span><b>{detail.failed.toLocaleString('en-US')}</b></div>
+          {/if}
+        </div>
+        {#if detail.error}
+          <div class="tech">
+            <div class="tech-title">{t('activity.detail.tech')}</div>
+            <pre>{detail.error}</pre>
+          </div>
+        {/if}
+      </div>
+      <div class="dialog-foot">
+        <div class="grow"></div>
+        <button class="btn filled" onclick={() => (detail = null)}>{t('common.close')}</button>
+      </div>
+    </div>
+  </Modal>
+{/if}

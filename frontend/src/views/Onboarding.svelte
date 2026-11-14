@@ -4,6 +4,7 @@
   import { app } from '$lib/state.svelte';
   import { t } from '$lib/i18n';
   import { providers } from '$lib/mock';
+  import { backend } from '$lib/backend';
 
   const top = providers.slice(0, 4);
   const mega = providers.find((p) => p.id === 'mega');
@@ -38,7 +39,7 @@
     </div>
 
     <div style="margin-top:22px;font:var(--type-body-s);color:var(--m3c-on-surface-variant)">
-      {t('onboarding.signup')} <button class="linklike" onclick={() => app.notify(t('onboarding.signupLink'))}>{t('onboarding.signupLink')}</button>
+      {t('onboarding.signup')} <button class="linklike" onclick={() => backend.openExternal('https://accounts.google.com/signup')}>{t('onboarding.signupLink')}</button>
     </div>
   </div>
 </div>

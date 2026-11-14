@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import Icon from '$lib/components/Icon.svelte';
   import ProviderIcon from '$lib/components/ProviderIcon.svelte';
   import Ring from '$lib/components/Ring.svelte';
@@ -7,7 +8,7 @@
   import { app } from '$lib/state.svelte';
   import { t, fmtBytes, fmtDuration } from '$lib/i18n';
   import { accounts as mockAccounts, backupSource, jobs, accountName } from '$lib/mock';
-  import { data, refreshJobs, type JobView } from '$lib/data.svelte';
+  import { data, refreshJobs, refreshHistory, type JobView } from '$lib/data.svelte';
   import { backend, isWails } from '$lib/backend';
 
   const step = $derived(app.step);
@@ -22,6 +23,50 @@
   let completed = $state(false);
   let showDeletions = $state(false);
   let folderPicker = $state(false);
+
+  // Backup preferences shown in the advanced panel. They are read-only here;
+  // the Settings page owns them.
+  let prefs = $state({ bwLimit: 'off', partSizeMB: 256 });
+  let excludeText = $state('');
+
+  onMount(async () => {
+    const s = await backend.getSettings();
+    if (s?.backup) {
+      prefs = { bwLimit: s.backup.bwLimit || 'off', partSizeMB: s.backup.partSizeMB || 256 };
+    }
+    excludeText = app.excludes.join('\n');
+  });
+
+  function openExcludes(): void {
+    excludeText = app.excludes.join('\n');
+    app.excludesOpen = true;
+  }
+
+  function saveExcludes(): void {
+    app.excludes = excludeText
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    app.excludesOpen = false;
+    computePlan();
+  }
+
+  function bwLabel(): string {
+    return prefs.bwLimit === 'off'
+      ? t('common.unlimited')
+      : `${prefs.bwLimit.replace(/M$/, '')} MB/s`;
+  }
+
+  const jobPaused = $derived(liveJob?.state === 'paused');
+
+  async function togglePause(): Promise<void> {
+    if (!app.activeJobId) return;
+    if (jobPaused) await backend.resumeJob(app.activeJobId);
+    else await backend.pauseJob(app.activeJobId);
+    await refreshJobs();
+    const found = data.jobs.find((j) => j.id === app.activeJobId);
+    if (found) liveJob = found;
+  }
 
   interface PlanView {
     files: number;
@@ -44,7 +89,8 @@
       destRoot: app.destRoot,
       mode: mirror ? 'mirror' : 'additive',
       fastFiles: app.fastFiles,
-      transfers: 4
+      transfers: 4,
+      excludes: app.excludes
     })) as { plan?: PlanView } | null;
     plan = res?.plan ?? null;
     planLoading = false;
@@ -159,7 +205,8 @@
       destRoot: app.destRoot,
       mode: mirror ? 'mirror' : 'additive',
       fastFiles: app.fastFiles,
-      transfers: 4
+      transfers: 4,
+      excludes: app.excludes
     });
     if (!res || res.err) {
       app.notify(res?.err?.detail || res?.err?.message || 'backup failed');
@@ -182,6 +229,7 @@
       } else if (liveJob) {
         completed = true;
         liveJob = null;
+        refreshHistory();
       }
     }, 1000);
     return () => clearInterval(timer);
@@ -440,7 +488,7 @@
                 <div class="al">
                   <div class="at">{t('wizard.s3.fast')}</div>
                   <div class="ad">{t('wizard.s3.fastSub')}</div>
-                  <div class="ad fast-count">{t('wizard.s3.fastCount', { n: 3, parts: 12 })}</div>
+                  <div class="ad fast-count">{t('wizard.s3.fastCount', { size: `${prefs.partSizeMB} MB` })}</div>
                 </div>
                 <input type="checkbox" class="switch" role="switch" bind:checked={app.fastFiles} />
               </div>
@@ -448,22 +496,24 @@
               <div class="adv-row">
                 <div class="al">
                   <div class="at">{t('wizard.adv.excludes')}</div>
-                  <div class="ad">{t('wizard.adv.excludesSub')}</div>
+                  <div class="ad">
+                    {app.excludes.length
+                      ? t('wizard.adv.excludesCount', { n: app.excludes.length })
+                      : t('wizard.adv.excludesSub')}
+                  </div>
                 </div>
-                <button class="btn text sm" onclick={() => app.notify(t('common.change'))}>
-                  {t('common.change')}
-                </button>
+                <button class="btn text sm" onclick={openExcludes}>{t('common.change')}</button>
               </div>
               <div class="adv-row">
                 <div class="al"><div class="at">{t('wizard.adv.speed')}</div></div>
-                <span class="hint">{t('common.unlimited')}</span>
+                <span class="hint">{bwLabel()}</span>
               </div>
               <div class="adv-row">
                 <div class="al">
                   <div class="at">{t('wizard.adv.parts')}</div>
                   <div class="ad">{t('wizard.adv.partsSub')}</div>
                 </div>
-                <span class="hint">{t('common.auto')}</span>
+                <span class="hint">{prefs.partSizeMB} MB</span>
               </div>
             </div>
           {/if}
@@ -478,9 +528,13 @@
           {#if completed}
             <button class="btn filled" onclick={() => app.closeOverlay()}>{t('common.done')}</button>
           {:else}
-            <button class="btn tonal" onclick={() => app.notify(t('progress.pauseHint'))}>
-              <Icon name="pause" size={18} /><span>{t('progress.pause')}</span>
+            <button class="btn tonal" onclick={togglePause}>
+              <Icon name={jobPaused ? 'play' : 'pause'} size={18} />
+              <span>{jobPaused ? t('activity.resume') : t('activity.pause')}</span>
             </button>
+            {#if jobPaused}
+              <span class="hint">{t('progress.pauseHint')}</span>
+            {/if}
             <button class="btn text" onclick={() => app.closeOverlay()}>{t('common.cancel')}</button>
           {/if}
         </div>
@@ -504,6 +558,37 @@
     </div>
   </div>
 </Modal>
+
+{#if app.excludesOpen}
+  <Modal labelledby="excl-title" onclose={() => (app.excludesOpen = false)}>
+    <div class="dialog" style="width:560px">
+      <div class="dialog-head" style="padding-bottom:2px">
+        <div class="grow">
+          <div class="dialog-title" id="excl-title">{t('wizard.adv.excludes')}</div>
+        </div>
+        <button class="icon-button" aria-label={t('common.close')} onclick={() => (app.excludesOpen = false)}>
+          <Icon name="close" size={20} />
+        </button>
+      </div>
+      <div class="dialog-body">
+        <p class="hint" style="margin:4px 0 10px">{t('wizard.excludes.body')}</p>
+        <textarea
+          class="textfield"
+          style="width:100%;min-height:132px;resize:vertical;padding:10px 12px;font-family:ui-monospace,Consolas,monospace;font-size:13px"
+          bind:value={excludeText}
+          spellcheck="false"
+          placeholder={t('wizard.excludes.placeholder')}
+        ></textarea>
+        <p class="hint" style="margin-top:10px">{t('wizard.excludes.example')}</p>
+      </div>
+      <div class="dialog-foot">
+        <div class="grow"></div>
+        <button class="btn text" onclick={() => (app.excludesOpen = false)}>{t('common.cancel')}</button>
+        <button class="btn filled" onclick={saveExcludes}>{t('common.save')}</button>
+      </div>
+    </div>
+  </Modal>
+{/if}
 
 {#if folderPicker && currentAccount}
   <CloudFolderPicker
