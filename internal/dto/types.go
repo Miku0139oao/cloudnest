@@ -287,3 +287,25 @@ type Settings struct {
 		Y      int `json:"y"`
 	} `json:"window"`
 }
+
+// ---------------------------------------------------------------- file ops
+
+// DeleteResult reports the outcome of DeleteCloud. Failed holds the paths that
+// could not be removed; Err carries the first failure for UI display.
+type DeleteResult struct {
+	Deleted int      `json:"deleted"`
+	Failed  []string `json:"failed,omitempty"`
+	Err     *Fail    `json:"err,omitempty"`
+}
+
+// SplitInfo describes a remote .cloudbox-part directory. PartCount is the
+// manifest's expected part count and Parts is how many parts were found.
+type SplitInfo struct {
+	State        string `json:"state"`
+	Parts        int    `json:"parts"`
+	PartCount    int    `json:"partCount"`
+	OriginalName string `json:"originalName"`
+	Size         int64  `json:"size"`
+	Missing      []int  `json:"missing,omitempty"`
+	Err          *Fail  `json:"err,omitempty"`
+}

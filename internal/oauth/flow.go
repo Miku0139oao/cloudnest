@@ -28,12 +28,12 @@ import (
 type State string
 
 const (
-	Preparing  State = "preparing"
-	Awaiting   State = "awaiting_url"
-	Waiting    State = "waiting"
-	Done       State = "done"
-	Cancelled  State = "cancelled"
-	Failed     State = "failed"
+	Preparing State = "preparing"
+	Awaiting  State = "awaiting_url"
+	Waiting   State = "waiting"
+	Done      State = "done"
+	Cancelled State = "cancelled"
+	Failed    State = "failed"
 )
 
 type Progress struct {

@@ -40,6 +40,7 @@ type jobState struct {
 	TotalBytes int64
 	Files      int
 	State      string
+	Phase      string
 	Bytes      int64
 	Speed      float64
 	ETA        *int64
@@ -51,21 +52,21 @@ type jobState struct {
 }
 
 type usageEntry struct {
-	used int64
+	used  int64
 	total int64
-	free int64
-	at   time.Time
+	free  int64
+	at    time.Time
 }
 
 type Service struct {
-	app       *application.App
-	eng       engine.Engine
-	store     *settings.Store
-	oauth     *oauth.Manager
-	rclone    string
-	log       *slog.Logger
-	dataDir   string
-	portable  bool
+	app      *application.App
+	eng      engine.Engine
+	store    *settings.Store
+	oauth    *oauth.Manager
+	rclone   string
+	log      *slog.Logger
+	dataDir  string
+	portable bool
 
 	mu      sync.Mutex
 	jobs    map[string]*jobState
@@ -579,37 +580,86 @@ func (s *Service) StartBackup(req dto.PlanRequest) dto.JobRef {
 		StartedAt: time.Now(), DestRoot: dest, AccountID: req.AccountID,
 		Sources: req.SourcePaths,
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	for _, src := range req.SourcePaths {
+
+	// Large-file acceleration is additive-only: a mirror sync would delete the
+	// remote .cloudbox-part folders because they never exist in the source.
+	splitOpts := splitOptionsFor(req.Mode)
+	var plan *splitBackupPlan
+	if req.FastFiles && splitOpts.Enabled {
+		p, err := buildSplitPlan(req.SourcePaths, dest, splitOpts)
+		if err != nil {
+			return dto.JobRef{Err: failFrom(err)}
+		}
+		plan = p
+	}
+	planActive := plan != nil && len(plan.files) > 0
+
+	for i, src := range req.SourcePaths {
 		st, err := os.Stat(src)
 		if err != nil {
 			return dto.JobRef{Err: failFrom(err)}
 		}
 		base := filepath.Base(filepath.Clean(src))
 		dstFs := req.AccountID + ":" + dest
-		srcFs := src
 		if st.IsDir() {
 			dstFs = req.AccountID + ":" + dest + "/" + base
 			job.Files = 0
 		}
 		job.Title = base
+
+		if planActive {
+			sp := &plan.sources[i]
+			if len(sp.large) > 0 {
+				// Small files travel in one filtered sync/copy per source; the
+				// large ones are hashed, staged and uploaded by the goroutine
+				// started after the job is registered.
+				if sp.copySmall {
+					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+					smallJobID, err := startSmallFileSync(ctx, c, src, dstFs, group, transfers, splitOpts.Threshold)
+					cancel()
+					if err != nil {
+						return dto.JobRef{Err: failFrom(err)}
+					}
+					job.JobIDs = append(job.JobIDs, smallJobID)
+				}
+				continue
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		jobID, err := c.StartSync(ctx, kind, rc.SyncIn{
-			SrcFs: srcFs, DstFs: dstFs, Group: group, Transfers: transfers,
+			SrcFs: src, DstFs: dstFs, Group: group, Transfers: transfers,
 		})
+		cancel()
 		if err != nil {
 			return dto.JobRef{Err: failFrom(err)}
 		}
 		job.JobIDs = append(job.JobIDs, jobID)
 	}
 
+	if planActive {
+		job.Phase = "hashing"
+		job.TotalBytes = plan.totalBytes()
+		// See pendingSplitJobID: keeps ActiveJobs from completing the job while
+		// hashing/staging has no real RC job to poll.
+		job.JobIDs = append(job.JobIDs, pendingSplitJobID)
+	}
+
 	s.mu.Lock()
 	s.jobs[id] = job
 	s.order = append(s.order, id)
 	s.mu.Unlock()
+
+	if planActive {
+		go s.runSplitBackup(c, job, plan)
+	}
+
 	first := int64(0)
-	if len(job.JobIDs) > 0 {
-		first = job.JobIDs[0]
+	for _, jobID := range job.JobIDs {
+		if jobID > 0 {
+			first = jobID
+			break
+		}
 	}
 	return dto.JobRef{ID: id, JobID: first, Group: group}
 }
@@ -634,7 +684,7 @@ func (s *Service) ActiveJobs() dto.JobProgressList {
 		if j.State == "done" || j.State == "cancelled" || j.State == "failed" {
 			continue
 		}
-		if stats, err := c.Stats(ctx, j.Group); err == nil && stats != nil {
+		if stats, err := c.Stats(ctx, j.Group); err == nil && stats != nil && j.Phase != "verifying" && j.Phase != "merging" {
 			j.Bytes = stats.Bytes
 			if stats.TotalBytes > 0 {
 				j.TotalBytes = stats.TotalBytes
@@ -651,26 +701,28 @@ func (s *Service) ActiveJobs() dto.JobProgressList {
 		}
 		finished := true
 		success := true
-		for _, id := range j.JobIDs {
-			js, err := c.JobStatus(ctx, id)
-			if err != nil {
-				finished = false
-				break
+		if j.Kind != "restore" {
+			for _, id := range j.JobIDs {
+				js, err := c.JobStatus(ctx, id)
+				if err != nil {
+					finished = false
+					break
+				}
+				if !js.Finished {
+					finished = false
+					break
+				}
+				if !js.Success {
+					success = false
+				}
 			}
-			if !js.Finished {
-				finished = false
-				break
+			if finished {
+				j.State = "done"
+				if !success {
+					j.State = "failed"
+				}
+				s.finishJob(j)
 			}
-			if !js.Success {
-				success = false
-			}
-		}
-		if finished {
-			j.State = "done"
-			if !success {
-				j.State = "failed"
-			}
-			s.finishJob(j)
 		}
 		if j.State == "paused" {
 			j.Speed = 0
@@ -679,6 +731,7 @@ func (s *Service) ActiveJobs() dto.JobProgressList {
 			ID: j.ID, Kind: j.Kind, State: j.State, Title: j.Title,
 			Current: j.Current, Bytes: j.Bytes, TotalBytes: j.TotalBytes,
 			Speed: j.Speed, ETA: j.ETA, TotalFiles: j.Files, Failed: j.Failed,
+			Phase: j.Phase,
 		})
 	}
 	sort.Slice(out, func(i, k int) bool { return out[i].ID < out[k].ID })
