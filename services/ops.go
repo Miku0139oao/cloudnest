@@ -191,6 +191,7 @@ func (s *Service) Upload(accountID, destPath string, localPaths []string) dto.Jo
 	s.jobs[id] = job
 	s.order = append(s.order, id)
 	s.mu.Unlock()
+	s.journalStart(dto.Record{ID: id, Kind: job.Kind, State: "running", Title: job.Title, StartedAt: job.StartedAt.Unix(), Files: job.Files}, dto.PlanRequest{})
 
 	first := int64(0)
 	if len(job.JobIDs) > 0 {
@@ -291,6 +292,7 @@ func (s *Service) Download(accountID string, remotePaths []string, localDir stri
 	s.jobs[id] = job
 	s.order = append(s.order, id)
 	s.mu.Unlock()
+	s.journalStart(dto.Record{ID: id, Kind: job.Kind, State: "running", Title: job.Title, StartedAt: job.StartedAt.Unix(), Files: job.Files}, dto.PlanRequest{})
 
 	first := int64(0)
 	if len(job.JobIDs) > 0 {

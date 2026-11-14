@@ -78,6 +78,11 @@ type Service struct {
 	records []dto.Record
 	usage   map[string]usageEntry
 
+	// journalEntries keeps the persisted history with enough detail to resume
+	// an interrupted backup after a restart.
+	journalEntries []dto.JournalEntry
+	journalPath    string
+
 	// closing is set once the user confirms stopping an in-flight transfer, so
 	// the window close guard lets the second request through.
 	closing atomic.Bool
@@ -100,6 +105,8 @@ func New(app *application.App, eng engine.Engine, store *settings.Store, rcloneP
 	if logger != nil {
 		s.oauth.SetLogf(func(format string, args ...any) { logger.Info(fmt.Sprintf(format, args...)) })
 	}
+	s.journalPath = journalPathFor(dataDir)
+	s.loadJournal()
 	return s
 }
 
@@ -133,6 +140,7 @@ func (s *Service) Bootstrap() dto.Bootstrap {
 	if len(out.Recent) > 5 {
 		out.Recent = out.Recent[:5]
 	}
+	out.Pending = s.PendingResume()
 	return out
 }
 
@@ -151,6 +159,18 @@ func (s *Service) GetSettings() dto.Settings { return s.store.Get() }
 
 func (s *Service) SaveSettings(in dto.Settings) dto.Empty {
 	before := s.store.Get().Advanced
+
+	// Keep the scheduler's "already ran" marker unless the schedule itself
+	// changed; otherwise every settings save would trigger an extra backup.
+	prevSched := s.store.Get().Schedule
+	in.Schedule.LastRun = prevSched.LastRun
+	if in.Schedule.Time != prevSched.Time ||
+		in.Schedule.AccountID != prevSched.AccountID ||
+		in.Schedule.DestRoot != prevSched.DestRoot ||
+		!sameStrings(in.Schedule.SourcePaths, prevSched.SourcePaths) {
+		in.Schedule.LastRun = 0
+	}
+
 	_ = s.store.Update(func(cur *dto.Settings) {
 		if in.Language != "" {
 			cur.Language = in.Language
@@ -159,6 +179,7 @@ func (s *Service) SaveSettings(in dto.Settings) dto.Empty {
 			cur.Theme = in.Theme
 		}
 		cur.Backup = in.Backup
+		cur.Schedule = in.Schedule
 		cur.Advanced = in.Advanced
 	})
 	after := s.store.Get().Advanced
@@ -833,6 +854,11 @@ func (s *Service) StartBackup(req dto.PlanRequest) dto.JobRef {
 	s.order = append(s.order, id)
 	s.mu.Unlock()
 
+	s.journalStart(dto.Record{
+		ID: id, Kind: "backup", State: "running", Title: job.Title,
+		StartedAt: job.StartedAt.Unix(), Files: job.Files,
+	}, req)
+
 	if planActive {
 		go s.runSplitBackup(c, job, plan)
 	}
@@ -978,9 +1004,9 @@ func (s *Service) History(limit int) dto.RecordList {
 
 func (s *Service) finishJob(j *jobState) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for _, rec := range s.records {
 		if rec.ID == j.ID {
+			s.mu.Unlock()
 			return
 		}
 	}
@@ -997,6 +1023,9 @@ func (s *Service) finishJob(j *jobState) {
 	if len(s.records) > 50 {
 		s.records = s.records[:50]
 	}
+	s.mu.Unlock()
+	// Persisted outside the lock: journalFinish takes it again.
+	s.journalFinish(rec)
 }
 
 // ---------------------------------------------------------------- helpers
@@ -1124,4 +1153,18 @@ func defaultRemoteName(provider string) string {
 	default:
 		return "Cloud"
 	}
+}
+
+// sameStrings reports whether two string slices are identical in order. Used
+// to decide whether a saved schedule still refers to the same work.
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

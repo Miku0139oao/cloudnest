@@ -1,6 +1,8 @@
 // Package dto holds the wire types shared with the Svelte frontend.
 package dto
 
+import "time"
+
 // Fail is a stable, UI-friendly error. Bound methods return data with Err set
 // instead of a Go error whenever the failure is something the user can act on.
 type Fail struct {
@@ -10,7 +12,9 @@ type Fail struct {
 	Retry   bool   `json:"retry"`
 }
 
-type Empty struct{}
+type Empty struct {
+	Err *Fail `json:"err,omitempty"`
+}
 
 // ---------------------------------------------------------------- bootstrap
 
@@ -23,16 +27,17 @@ type EngineStatus struct {
 }
 
 type Bootstrap struct {
-	Version    string       `json:"version"`
-	Language   string       `json:"language"`
-	Theme      string       `json:"theme"`
-	Onboarded  bool         `json:"onboarded"`
-	Engine     EngineStatus `json:"engine"`
-	Accounts   []Account    `json:"accounts"`
-	Recent     []Record     `json:"recent"`
-	Err        *Fail        `json:"err,omitempty"`
-	DataDir    string       `json:"dataDir"`
-	PortableOK bool         `json:"portableOk"`
+	Version    string         `json:"version"`
+	Language   string         `json:"language"`
+	Theme      string         `json:"theme"`
+	Onboarded  bool           `json:"onboarded"`
+	Engine     EngineStatus   `json:"engine"`
+	Accounts   []Account      `json:"accounts"`
+	Recent     []Record       `json:"recent"`
+	Pending    []JournalEntry `json:"pending,omitempty"`
+	Err        *Fail          `json:"err,omitempty"`
+	DataDir    string         `json:"dataDir"`
+	PortableOK bool           `json:"portableOk"`
 }
 
 // ---------------------------------------------------------------- accounts
@@ -215,6 +220,105 @@ type RecordList struct {
 	Err   *Fail    `json:"err,omitempty"`
 }
 
+// ---------------------------------------------------------------- remote ops
+
+// OpResult reports a bulk operation over several paths.
+type OpResult struct {
+	Done   int      `json:"done"`
+	Failed []string `json:"failed,omitempty"`
+	Err    *Fail    `json:"err,omitempty"`
+}
+
+// SearchHit is one recursive search result.
+type SearchHit struct {
+	Path    string    `json:"path"`
+	Name    string    `json:"name"`
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"modTime"`
+	IsSplit bool      `json:"split,omitempty"`
+}
+
+type SearchResult struct {
+	Items     []SearchHit `json:"items"`
+	Truncated bool        `json:"truncated"`
+	Err       *Fail       `json:"err,omitempty"`
+}
+
+// FileDetail carries metadata and hashes for one cloud file.
+type FileDetail struct {
+	Path    string    `json:"path"`
+	Name    string    `json:"name"`
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"modTime"`
+	IsDir   bool      `json:"isDir"`
+	SHA256  string    `json:"sha256,omitempty"`
+	MD5     string    `json:"md5,omitempty"`
+	Err     *Fail     `json:"err,omitempty"`
+}
+
+// ShareResult is the link returned by operations/publiclink.
+type ShareResult struct {
+	URL string `json:"url"`
+	Err *Fail  `json:"err,omitempty"`
+}
+
+// CheckResult summarises operations/check between two locations.
+type CheckResult struct {
+	Same     int      `json:"same"`
+	Differ   int      `json:"differ"`
+	Missing  int      `json:"missing"`
+	Status   string   `json:"status,omitempty"`
+	Examples []string `json:"examples,omitempty"`
+	Err      *Fail    `json:"err,omitempty"`
+}
+
+// MountInfo describes one active rclone mount.
+type MountInfo struct {
+	MountPoint string `json:"mountPoint"`
+	Fs         string `json:"fs"`
+	MountedOn  string `json:"mountedOn,omitempty"`
+}
+
+type MountList struct {
+	Items  []MountInfo `json:"items"`
+	WinFsp bool        `json:"winFsp"`
+	Err    *Fail       `json:"err,omitempty"`
+}
+
+// ---------------------------------------------------------------- journal
+
+// JournalEntry is the persisted form of one transfer, complete enough to be
+// offered for resume after a restart.
+type JournalEntry struct {
+	ID         string      `json:"id"`
+	Kind       string      `json:"kind"`
+	Title      string      `json:"title"`
+	State      string      `json:"state"` // running | done | failed | cancelled | interrupted
+	StartedAt  int64       `json:"startedAt"`
+	FinishedAt int64       `json:"finishedAt,omitempty"`
+	Bytes      int64       `json:"bytes"`
+	Files      int         `json:"files"`
+	Failed     int         `json:"failed"`
+	Error      string      `json:"error,omitempty"`
+	Request    PlanRequest `json:"request"`
+}
+
+type Journal struct {
+	Entries []JournalEntry `json:"entries"`
+}
+
+// Schedule is the saved automatic-backup configuration.
+type Schedule struct {
+	Enabled     bool     `json:"enabled"`
+	SourcePaths []string `json:"sourcePaths,omitempty"`
+	AccountID   string   `json:"accountId,omitempty"`
+	DestRoot    string   `json:"destRoot,omitempty"`
+	Mode        string   `json:"mode,omitempty"`
+	FastFiles   bool     `json:"fastFiles"`
+	Time        string   `json:"time,omitempty"` // HH:MM, local time
+	LastRun     int64    `json:"lastRun,omitempty"`
+}
+
 type JobProgressList struct {
 	Items []JobProgress `json:"items"`
 	Err   *Fail         `json:"err,omitempty"`
@@ -278,6 +382,7 @@ type Settings struct {
 		FastFiles  bool   `json:"fastFiles"`
 		PartSizeMB int    `json:"partSizeMB"`
 	} `json:"backup"`
+	Schedule Schedule `json:"schedule"`
 	Advanced struct {
 		Proxy      bool   `json:"proxy"`
 		Verbose    bool   `json:"verbose"`

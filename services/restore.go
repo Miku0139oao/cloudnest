@@ -38,6 +38,11 @@ func (s *Service) RestoreSplit(accountID, partsPath, destDir string) dto.JobRef 
 	s.order = append(s.order, id)
 	s.mu.Unlock()
 
+	s.journalStart(dto.Record{
+		ID: id, Kind: "restore", State: "running", Title: name,
+		StartedAt: j.StartedAt.Unix(),
+	}, dto.PlanRequest{})
+
 	go s.runRestore(c, j, accountID, partsPath, destDir)
 	return dto.JobRef{ID: id, Group: group}
 }
