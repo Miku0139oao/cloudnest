@@ -1,0 +1,203 @@
+/* =========================================================================
+   Cloudnest — Material 3 design tokens
+   Seed #8B5CF6 · Vibrant primary family + Tonal Spot surfaces
+   Token names mirror m3-svelte's `--m3c-*`, so this file ports verbatim.
+   ========================================================================= */
+
+:root {
+  /* Base declaration stays `light dark`; explicit themes opt in below. */
+  color-scheme: light dark;
+  accent-color: var(--m3c-primary);
+
+  /* --- key colors ------------------------------------------------------- */
+  --m3c-primary: #7114ff;
+  --m3c-on-primary: #ffffff;
+  --m3c-primary-container: #e9ddff;
+  --m3c-on-primary-container: #5600ca;
+  --m3c-inverse-primary: #d0bcff;
+
+  --m3c-secondary: #6b5778;
+  --m3c-on-secondary: #ffffff;
+  --m3c-secondary-container: #f3daff;
+  --m3c-on-secondary-container: #533f5f;
+
+  --m3c-tertiary: #7e525f;
+  --m3c-on-tertiary: #ffffff;
+  --m3c-tertiary-container: #ffd9e2;
+  --m3c-on-tertiary-container: #633b48;
+
+  --m3c-error: #ba1a1a;
+  --m3c-on-error: #ffffff;
+  --m3c-error-container: #ffdad6;
+  --m3c-on-error-container: #93000a;
+  --m3c-success: #1f6f3f;
+  --m3c-success-container: #c8f0d4;
+  --m3c-on-success-container: #06391a;
+
+  /* --- surfaces --------------------------------------------------------- */
+  --m3c-surface: #fef7ff;
+  --m3c-on-surface: #1d1b20;
+  --m3c-surface-dim: #ded8e0;
+  --m3c-surface-bright: #fef7ff;
+  --m3c-surface-container-lowest: #ffffff;
+  --m3c-surface-container-low: #f8f1ff;
+  --m3c-surface-container: #f3ebfa;
+  --m3c-surface-container-high: #ede5f4;
+  --m3c-surface-container-highest: #e7e0ee;
+  --m3c-on-surface-variant: #49454e;
+
+  --m3c-outline: #7a757f;
+  --m3c-outline-variant: #cbc3d5;
+  --m3c-inverse-surface: #322f35;
+  --m3c-inverse-on-surface: #f5eff7;
+  --m3c-shadow: #000000;
+  --m3c-scrim: #000000;
+
+  /* --- fixed roles ------------------------------------------------------ */
+  --m3c-primary-fixed: #e9ddff;
+  --m3c-primary-fixed-dim: #d0bcff;
+  --m3c-on-primary-fixed: #210f47;
+  --m3c-on-primary-fixed-variant: #4d3d75;
+
+  /* --- aliases for spec parity ----------------------------------------- */
+  --md-sys-color-primary: var(--m3c-primary);
+  --md-sys-color-on-primary: var(--m3c-on-primary);
+  --md-sys-color-primary-container: var(--m3c-primary-container);
+  --md-sys-color-on-primary-container: var(--m3c-on-primary-container);
+  --md-sys-color-surface: var(--m3c-surface);
+  --md-sys-color-on-surface: var(--m3c-on-surface);
+  --md-sys-color-surface-container-high: var(--m3c-surface-container-high);
+  --md-sys-color-outline-variant: var(--m3c-outline-variant);
+
+  /* --- brand / provider ------------------------------------------------ */
+  --brand-google: #1a73e8;
+  --brand-onedrive: #0f6cbd;
+  --brand-dropbox: #0061ff;
+  --brand-box: #0061d5;
+  --brand-mega: #d9272e;
+  --brand-pcloud: #21a0df;
+  --brand-aws: #ff9900;
+  --brand-webdav: #5f6368;
+
+  /* --- typography ------------------------------------------------------ */
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", "Noto Sans TC",
+    "Microsoft JhengHei UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", "Noto Sans TC",
+    "Microsoft JhengHei UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "Consolas", "SFMono-Regular", monospace;
+
+  --type-display-s: 400 36px/44px var(--font-display);
+  --type-headline-m: 400 28px/36px var(--font-display);
+  --type-headline-s: 400 24px/32px var(--font-display);
+  --type-title-l: 400 22px/28px var(--font-display);
+  --type-title-m: 500 16px/24px var(--font-sans);
+  --type-title-s: 500 14px/20px var(--font-sans);
+  --type-body-l: 400 16px/24px var(--font-sans);
+  --type-body-m: 400 14px/20px var(--font-sans);
+  --type-body-s: 400 12px/16px var(--font-sans);
+  --type-label-l: 500 14px/20px var(--font-sans);
+  --type-label-m: 500 12px/16px var(--font-sans);
+  --type-label-s: 500 11px/16px var(--font-sans);
+
+  /* --- shape ----------------------------------------------------------- */
+  --shape-xs: 4px;
+  --shape-s: 8px;
+  --shape-m: 12px;
+  --shape-l: 16px;
+  --shape-xl: 28px;
+  --shape-full: 999px;
+
+  /* --- elevation ------------------------------------------------------- */
+  --elev-0: none;
+  --elev-1: 0 1px 2px rgb(0 0 0 / 0.10), 0 1px 3px 1px rgb(0 0 0 / 0.06);
+  --elev-2: 0 1px 2px rgb(0 0 0 / 0.12), 0 2px 6px 2px rgb(0 0 0 / 0.08);
+  --elev-3: 0 4px 8px 3px rgb(0 0 0 / 0.10), 0 1px 3px rgb(0 0 0 / 0.14);
+
+  /* --- motion ---------------------------------------------------------- */
+  --ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --dur-short: 120ms;
+  --dur-medium: 220ms;
+  --dur-long: 320ms;
+
+  /* --- layout ---------------------------------------------------------- */
+  --titlebar-h: 48px;
+  --rail-w: 80px;
+  --gutter: 32px;
+  --row-h: 32px;
+  --toolbar-h: 48px;
+  --radius-window: 0px;
+}
+
+html[data-theme="light"] {
+  color-scheme: light;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+
+  --m3c-primary: #d0bcff;
+  --m3c-on-primary: #3c0091;
+  --m3c-primary-container: #5600ca;
+  --m3c-on-primary-container: #e9ddff;
+  --m3c-inverse-primary: #7114ff;
+
+  --m3c-secondary: #d7bde4;
+  --m3c-on-secondary: #3b2947;
+  --m3c-secondary-container: #533f5f;
+  --m3c-on-secondary-container: #f3daff;
+
+  --m3c-tertiary: #efb8c7;
+  --m3c-on-tertiary: #4a2531;
+  --m3c-tertiary-container: #633b48;
+  --m3c-on-tertiary-container: #ffd9e2;
+
+  --m3c-error: #ffb4ab;
+  --m3c-on-error: #690005;
+  --m3c-error-container: #93000a;
+  --m3c-on-error-container: #ffdad6;
+  --m3c-success: #8fd6a6;
+  --m3c-success-container: #1d4a2c;
+  --m3c-on-success-container: #b7f0c6;
+
+  --m3c-surface: #15121c;
+  --m3c-on-surface: #e6e0e9;
+  --m3c-surface-dim: #15121c;
+  --m3c-surface-bright: #3b383e;
+  --m3c-surface-container-lowest: #100d15;
+  --m3c-surface-container-low: #1d1a24;
+  --m3c-surface-container: #211e28;
+  --m3c-surface-container-high: #2c2833;
+  --m3c-surface-container-highest: #37333e;
+  --m3c-on-surface-variant: #cac4cf;
+
+  --m3c-outline: #948f99;
+  --m3c-outline-variant: #494453;
+  --m3c-inverse-surface: #e6e0e9;
+  --m3c-inverse-on-surface: #322f35;
+
+  --m3c-primary-fixed: #e9ddff;
+  --m3c-primary-fixed-dim: #d0bcff;
+  --m3c-on-primary-fixed: #210f47;
+  --m3c-on-primary-fixed-variant: #4d3d75;
+
+  --elev-1: 0 1px 2px rgb(0 0 0 / 0.30), 0 1px 3px 1px rgb(0 0 0 / 0.20);
+  --elev-2: 0 1px 2px rgb(0 0 0 / 0.34), 0 2px 6px 2px rgb(0 0 0 / 0.24);
+  --elev-3: 0 4px 8px 3px rgb(0 0 0 / 0.34), 0 1px 3px rgb(0 0 0 / 0.40);
+}
+
+/* Static mode: kill every animation for deterministic screenshots. */
+html[data-static] *,
+html[data-static] *::before,
+html[data-static] *::after {
+  animation-duration: 0s !important;
+  animation-delay: 0s !important;
+  transition-duration: 0s !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0s !important;
+    transition-duration: 0s !important;
+  }
+}

@@ -1,0 +1,9 @@
+.task
+.wails
+bin
+frontend/dist
+frontend/node_modules
+*.log
+.DS_Store
+.tmp-icons
+google-drive-parallel-upload.user.js

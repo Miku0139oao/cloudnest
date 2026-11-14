@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>雲栖 Cloudnest — 預覽</title>
+<meta name="color-scheme" content="light dark">
+<script>
+/* Applies the URL/OS scheme before first paint to avoid a flash. */
+(function () {
+  try {
+    var m = /[?&]theme=(light|dark)/.exec(location.hash);
+    var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.dataset.theme = m ? m[1] : (dark ? 'dark' : 'light');
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%237114FF'/%3E%3Cpath d='M7 17a4 4 0 0 1-.6-7.95A5.5 5.5 0 0 1 17 9.5a3.75 3.75 0 0 1 .25 7.5z' fill='white'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles/tokens.css">
+<link rel="stylesheet" href="styles/shell.css">
+<link rel="stylesheet" href="styles/components.css">
+<link rel="stylesheet" href="styles/screens.css">
+</head>
+<body>
+<div id="app"></div>
+
+<script defer src="js/icons.js"></script>
+<script defer src="js/i18n.js"></script>
+<script defer src="js/fixtures.js"></script>
+<script defer src="js/ui.js"></script>
+<script defer src="js/screens/home.js"></script>
+<script defer src="js/screens/wizard.js"></script>
+<script defer src="js/screens/clouds.js"></script>
+<script defer src="js/screens/files.js"></script>
+<script defer src="js/screens/activity.js"></script>
+<script defer src="js/screens/settings.js"></script>
+<script defer src="js/main.js"></script>
+</body>
+</html>

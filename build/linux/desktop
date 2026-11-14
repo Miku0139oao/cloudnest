@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=Cloudnest
+Comment=Cloudnest 雲栖 — simple cloud backup
+# The Exec line includes %u to pass the URL to the application
+Exec=/usr/local/bin/cloudnest.exe %u
+Terminal=false
+Type=Application
+Icon=cloudnest.exe
+Categories=Utility;
+StartupWMClass=cloudnest.exe
+
+ 
