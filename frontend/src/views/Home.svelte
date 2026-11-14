@@ -5,8 +5,18 @@
   import { app } from '$lib/state.svelte';
   import { t, fmtBytes, fmtTime } from '$lib/i18n';
   import { accountName } from '$lib/mock';
-  import { data, refreshUsage, refreshJobs } from '$lib/data.svelte';
+  import { data, refreshUsage, refreshJobs, resumePending, dismissPending } from '$lib/data.svelte';
   import { backend, isWails } from '$lib/backend';
+
+  async function continuePending(): Promise<void> {
+    const first = data.pendingResume[0];
+    if (!first) return;
+    if (await resumePending(first.id)) {
+      app.go('activity');
+    } else {
+      app.notify(t('home.resume.failed'));
+    }
+  }
 
   onMount(() => {
     // Quota is nice-to-have; never let it contend with a file listing.
@@ -65,6 +75,24 @@
         <rect x="132" y="110" width="52" height="6" rx="3" fill="#ffffff" opacity=".55" />
       </svg>
     </section>
+
+    {#if data.pendingResume.length}
+      <div class="resume-banner">
+        <span class="rb-icon"><Icon name="history" size={20} /></span>
+        <div class="grow">
+          <div class="rb-title">{t('home.resume.title')}</div>
+          <div class="rb-sub">
+            {t('home.resume.sub', { name: data.pendingResume[0].title })}
+          </div>
+        </div>
+        <button class="btn text sm" onclick={() => dismissPending(data.pendingResume[0].id)}>
+          {t('home.resume.dismiss')}
+        </button>
+        <button class="btn filled sm" onclick={continuePending}>
+          <Icon name="play" size={16} /><span>{t('home.resume.action')}</span>
+        </button>
+      </div>
+    {/if}
 
     <div class="quick-grid">
       <button class="card tonal quick-card" onclick={() => app.go('files')}>

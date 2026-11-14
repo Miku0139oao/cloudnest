@@ -71,6 +71,20 @@ function mapEntry(e: {
   };
 }
 
+export interface PendingBackup {
+  id: string;
+  title: string;
+  request: {
+    sourcePaths: string[];
+    accountId: string;
+    destRoot: string;
+    mode: string;
+    fastFiles: boolean;
+    transfers: number;
+    excludes: string[];
+  };
+}
+
 export interface JobView {
   id: string;
   kind: string;
@@ -101,6 +115,8 @@ export const data = $state({
   jobs: [] as JobView[],
   engine: { state: 'starting', version: '', message: '' },
   ready: false,
+  // Backups that were interrupted by a restart; offered on the home page.
+  pendingResume: [] as PendingBackup[],
   live: isWails,
   localPath: '',
   localRoot: '',
@@ -144,6 +160,7 @@ export async function boot(): Promise<void> {
   app.applySaved(b.language, b.theme as 'system' | 'light' | 'dark');
   applyEngine(b.engine);
   data.live = true;
+  data.pendingResume = (b.pending ?? []) as unknown as PendingBackup[];
   if (b.accounts?.length) {
     data.accounts = b.accounts.map(mapAccount);
     data.activeAccount = data.accounts[0].id;
@@ -295,4 +312,22 @@ export async function refreshRoots(): Promise<string> {
   data.localPath = downloads.path;
   await refreshLocal(downloads.path);
   return downloads.path;
+}
+
+// Resume an interrupted backup from the request stored in the journal. rclone
+// skips files that already arrived, so it only sends the remainder.
+export async function resumePending(id: string): Promise<boolean> {
+  const entry = data.pendingResume.find((p) => p.id === id);
+  if (!entry) return false;
+  const res = (await backend.startBackup(entry.request as never)) as
+    | { err?: unknown }
+    | null;
+  if (!res || res.err) return false;
+  data.pendingResume = data.pendingResume.filter((p) => p.id !== id);
+  return true;
+}
+
+export function dismissPending(id: string): void {
+  data.pendingResume = data.pendingResume.filter((p) => p.id !== id);
+  backend.dismissResume(id);
 }

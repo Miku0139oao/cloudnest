@@ -10,6 +10,7 @@
   import { backend } from '$lib/backend';
 
   onMount(() => {
+    refreshMounts();
     // Quota is cached for ten minutes in the backend, so a slow poll is cheap
     // and repairs the "unknown" label after a provider hiccup.
     const first = setTimeout(() => refreshUsage(), 1200);
@@ -22,6 +23,54 @@
 
   let removeFor = $state<Account | null>(null);
   let removing = $state(false);
+
+  interface MountRow {
+    mountPoint: string;
+    fs: string;
+    mountedOn?: string;
+  }
+  let mounts = $state<MountRow[]>([]);
+  let freeLetters = $state<string[]>([]);
+  let mountFor = $state<Account | null>(null);
+  let mountLetter = $state('');
+  let mounting = $state(false);
+  let mountError = $state('');
+
+  async function refreshMounts(): Promise<void> {
+    const res = await backend.listMounts();
+    mounts = (res?.items ?? []) as MountRow[];
+    freeLetters = ((await backend.freeDriveLetters()) ?? []) as string[];
+  }
+
+  async function openMount(a: Account): Promise<void> {
+    mountFor = a;
+    mountError = '';
+    await refreshMounts();
+    mountLetter = freeLetters[0] ?? '';
+  }
+
+  async function doMount(): Promise<void> {
+    if (!mountFor || !mountLetter) return;
+    mounting = true;
+    const res = await backend.mountCloud(mountFor.id, '', mountLetter);
+    mounting = false;
+    if (res?.err) {
+      mountError = res.err.detail || res.err.message || t('clouds.mountFailed');
+      return;
+    }
+    mountFor = null;
+    await refreshMounts();
+    app.notify(t('clouds.mounted'));
+  }
+
+  async function unmount(mountPoint: string): Promise<void> {
+    const res = await backend.unmountCloud(mountPoint);
+    if (res?.err) {
+      app.notify(res.err.message ?? t('clouds.mountFailed'));
+      return;
+    }
+    await refreshMounts();
+  }
 
   function closeMenu(id: string): void {
     const el = document.getElementById(`menu-${id}`);
@@ -59,6 +108,22 @@
         <Icon name="add" size={18} /><span>{t('clouds.add')}</span>
       </button>
     </div>
+
+    {#if mounts.length}
+      <section class="mounts">
+        <div class="section-head"><h3 class="section-title">{t('clouds.mounts')}</h3></div>
+        {#each mounts as m (m.mountPoint)}
+          <div class="mount-row">
+            <span class="mr-icon"><Icon name="storage" size={18} /></span>
+            <b class="nums">{m.mountPoint}</b>
+            <span class="grow truncate">{m.fs}</span>
+            <button class="btn text sm" onclick={() => unmount(m.mountPoint)}>
+              {t('clouds.unmount')}
+            </button>
+          </div>
+        {/each}
+      </section>
+    {/if}
 
     <div class="cloud-grid">
       {#each data.accounts as a (a.id)}
@@ -101,6 +166,9 @@
             </button>
             <button type="button" onclick={() => { closeMenu(a.id); relogin(a); }}>
               <Icon name="key" size={18} />{t('clouds.reloginAction')}
+            </button>
+            <button type="button" onclick={() => { closeMenu(a.id); openMount(a); }}>
+              <Icon name="storage" size={18} />{t('clouds.mount')}
             </button>
             <hr class="divider" />
             <button type="button" class="danger" onclick={() => { closeMenu(a.id); removeFor = a; }}>
@@ -149,6 +217,52 @@
         <div class="grow"></div>
         <button class="btn danger-filled" disabled={removing} onclick={confirmRemove}>
           <Icon name="delete" size={18} /><span>{t('clouds.remove')}</span>
+        </button>
+      </div>
+    </div>
+  </Modal>
+{/if}
+
+{#if mountFor}
+  <Modal labelledby="mount-title" onclose={() => (mountFor = null)}>
+    <div class="dialog" style="width: 480px">
+      <div class="dialog-head" style="padding-bottom: 2px">
+        <div class="grow">
+          <div class="dialog-title" id="mount-title">
+            {t('clouds.mountTitle', { name: accountName(mountFor, app.lang) })}
+          </div>
+        </div>
+        <button class="icon-button" aria-label={t('common.close')} onclick={() => (mountFor = null)}>
+          <Icon name="close" size={20} />
+        </button>
+      </div>
+      <div class="dialog-body">
+        <p style="margin: 4px 0 12px; color: var(--m3c-on-surface-variant)">
+          {t('clouds.mountBody')}
+        </p>
+        <div class="set-row" style="padding: 0">
+          <div class="sl"><div class="st">{t('clouds.mountLetter')}</div></div>
+          <div class="sc">
+            <select class="textfield" style="height:36px;min-width:110px;border-radius:12px;background:var(--m3c-surface-container-high);border:0"
+              bind:value={mountLetter} aria-label={t('clouds.mountLetter')}>
+              {#each freeLetters as letter (letter)}
+                <option value={letter}>{letter}</option>
+              {/each}
+            </select>
+          </div>
+        </div>
+        {#if mountError}
+          <div class="banner" style="margin-top: 12px">
+            <Icon name="error" size={20} />
+            <div>{mountError}</div>
+          </div>
+        {/if}
+      </div>
+      <div class="dialog-foot">
+        <div class="grow"></div>
+        <button class="btn text" onclick={() => (mountFor = null)}>{t('common.cancel')}</button>
+        <button class="btn filled" disabled={!mountLetter || mounting} onclick={doMount}>
+          <Icon name="storage" size={18} /><span>{t('clouds.mountAction')}</span>
         </button>
       </div>
     </div>

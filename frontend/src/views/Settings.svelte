@@ -3,7 +3,7 @@
   import Icon from '$lib/components/Icon.svelte';
   import { app } from '$lib/state.svelte';
   import { t } from '$lib/i18n';
-  import { appVersion, engineVersion } from '$lib/mock';
+  import { appVersion, engineVersion, accountName } from '$lib/mock';
   import { data } from '$lib/data.svelte';
   import { backend, type DTO } from '$lib/backend';
 
@@ -18,6 +18,13 @@
   let bwLimit = $state('off');
   let partSize = $state(256);
 
+  let schedEnabled = $state(false);
+  let schedTime = $state('03:00');
+  let schedSource = $state('');
+  let schedAccount = $state('');
+  let schedDest = $state('電腦備份');
+  let schedMode = $state<'additive' | 'mirror'>('additive');
+
   onMount(async () => {
     const s = await backend.getSettings();
     if (!s) return;
@@ -28,7 +35,24 @@
     partSize = s.backup?.partSizeMB ?? 256;
     proxy = s.advanced?.proxy ?? false;
     verbose = s.advanced?.verbose ?? false;
+    const sch = s.schedule;
+    if (sch) {
+      schedEnabled = sch.enabled ?? false;
+      schedTime = sch.time || '03:00';
+      schedSource = sch.sourcePaths?.[0] ?? '';
+      schedAccount = sch.accountId ?? '';
+      schedDest = sch.destRoot || '電腦備份';
+      schedMode = sch.mode === 'mirror' ? 'mirror' : 'additive';
+    }
   });
+
+  async function pickScheduleSource(): Promise<void> {
+    const picked = await backend.chooseFolder(t('settings.scheduleSource'));
+    if (picked?.path) {
+      schedSource = picked.path;
+      persist();
+    }
+  }
 
   function persist(): void {
     const s: DTO.Settings = {
@@ -36,6 +60,16 @@
       theme: app.theme,
       onboarded: true,
       backup: { transfers, bwLimit, autoRetry, fastFiles, partSizeMB: partSize },
+      schedule: {
+        enabled: schedEnabled,
+        sourcePaths: schedSource ? [schedSource] : [],
+        accountId: schedAccount,
+        destRoot: schedDest,
+        mode: schedMode,
+        fastFiles,
+        time: schedTime,
+        lastRun: 0
+      },
       advanced: { proxy, verbose, enginePath: '' },
       window: { width: 0, height: 0, x: 0, y: 0 }
     };
@@ -178,6 +212,79 @@
                 </select>
               </div>
             </div>
+            <div class="set-row">
+              <div class="sl">
+                <div class="st">{t('settings.schedule')}</div>
+                <div class="sd">{t('settings.scheduleSub')}</div>
+              </div>
+              <div class="sc">
+                <input type="checkbox" class="switch" role="switch" bind:checked={schedEnabled}
+                  onchange={persist} />
+              </div>
+            </div>
+            {#if schedEnabled}
+              <div class="set-row">
+                <div class="sl">
+                  <div class="st">{t('settings.scheduleTime')}</div>
+                  <div class="sd">{t('settings.scheduleTimeSub')}</div>
+                </div>
+                <div class="sc">
+                  <input type="time" class="textfield" style="height:36px;border-radius:12px;background:var(--m3c-surface-container-high);border:0;padding:0 12px"
+                    bind:value={schedTime} onchange={persist} />
+                </div>
+              </div>
+              <div class="set-row">
+                <div class="sl">
+                  <div class="st">{t('settings.scheduleSource')}</div>
+                  <div class="sd truncate">{schedSource || t('settings.scheduleSourceEmpty')}</div>
+                </div>
+                <div class="sc">
+                  <button class="btn text sm" onclick={pickScheduleSource}>{t('common.change')}</button>
+                </div>
+              </div>
+              <div class="set-row">
+                <div class="sl">
+                  <div class="st">{t('settings.scheduleAccount')}</div>
+                  <div class="sd">{t('settings.scheduleAccountSub')}</div>
+                </div>
+                <div class="sc">
+                  <select class="textfield" style="height:36px;min-width:150px;border-radius:12px;background:var(--m3c-surface-container-high);border:0"
+                    bind:value={schedAccount} onchange={persist} aria-label={t('settings.scheduleAccount')}>
+                    <option value="">{t('settings.scheduleAccountNone')}</option>
+                    {#each data.accounts as a (a.id)}
+                      <option value={a.id}>{accountName(a, app.lang)}</option>
+                    {/each}
+                  </select>
+                </div>
+              </div>
+              <div class="set-row">
+                <div class="sl">
+                  <div class="st">{t('settings.scheduleDest')}</div>
+                  <div class="sd">{t('settings.scheduleDestSub')}</div>
+                </div>
+                <div class="sc">
+                  <input class="textfield" style="height:36px;width:180px;border-radius:12px;background:var(--m3c-surface-container-high);border:0;padding:0 12px"
+                    bind:value={schedDest} onchange={persist} aria-label={t('settings.scheduleDest')} />
+                </div>
+              </div>
+              <div class="set-row">
+                <div class="sl">
+                  <div class="st">{t('settings.scheduleMode')}</div>
+                  <div class="sd">{t('settings.scheduleModeSub')}</div>
+                </div>
+                <div class="sc">
+                  <div class="segmented">
+                    <button type="button" aria-pressed={schedMode === 'additive'}
+                      onclick={() => { schedMode = 'additive'; persist(); }}>{t('wizard.s3.modeAdd').split('（')[0]}</button>
+                    <button type="button" aria-pressed={schedMode === 'mirror'}
+                      onclick={() => { schedMode = 'mirror'; persist(); }}>{t('settings.scheduleMirror')}</button>
+                  </div>
+                </div>
+              </div>
+              <div style="padding:0 18px 14px">
+                <div class="privacy"><Icon name="info" size={16} /><div>{t('settings.scheduleHint')}</div></div>
+              </div>
+            {/if}
           </div>
         </section>
       {:else if section === 'advanced'}

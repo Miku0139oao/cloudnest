@@ -58,6 +58,28 @@ export const backend = {
   setTheme: (theme: string) => safe(() => Service.SetTheme(theme)),
   applyBwLimit: (rate: string) => safe(() => Service.ApplyBwLimit(rate)),
   markOnboarded: () => safe(() => Service.MarkOnboarded()),
+  dismissResume: (id: string) => safe(() => Service.DismissResume(id)),
+
+  listMounts: () => safe(() => Service.ListMounts()),
+  mountCloud: (account: string, path: string, letter: string) =>
+    safe(() => Service.MountCloud(account, path, letter)),
+  unmountCloud: (mountPoint: string) => safe(() => Service.UnmountCloud(mountPoint)),
+  freeDriveLetters: () => safe(() => Service.FreeDriveLetters()),
+
+  renameCloud: (account: string, path: string, newName: string) =>
+    safe(() => Service.RenameCloud(account, path, newName)),
+  moveCloud: (account: string, paths: string[], dest: string) =>
+    safe(() => Service.MoveCloud(account, paths, dest)),
+  copyCloud: (src: string, paths: string[], dstAccount: string, dest: string) =>
+    safe(() => Service.CopyCloud(src, paths, dstAccount, dest)),
+  renameLocal: (path: string, newName: string) => safe(() => Service.RenameLocal(path, newName)),
+  moveLocal: (paths: string[], dest: string) => safe(() => Service.MoveLocal(paths, dest)),
+  searchCloud: (account: string, query: string) => safe(() => Service.SearchCloud(account, query)),
+  fileDetail: (account: string, path: string) => safe(() => Service.FileDetail(account, path)),
+  shareLink: (account: string, path: string) => safe(() => Service.ShareLink(account, path)),
+  cleanupTrash: (account: string) => safe(() => Service.CleanupTrash(account)),
+  verifyBackup: (account: string, localPath: string, destRoot: string) =>
+    safe(() => Service.VerifyBackup(account, localPath, destRoot)),
 
   chooseFolder: (title: string) => safe(() => Service.ChooseFolder(title)),
   chooseFiles: (title: string) => safe(() => Service.ChooseFiles(title)),
