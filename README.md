@@ -31,7 +31,7 @@ rclone 很強，但對一般使用者來說是命令列、設定檔與參數。C
 
 系統匣：設定排程後，關閉視窗會縮到系統匣繼續執行，托盤選單可真正結束。
 
-尚未包含：程式碼簽章（SmartScreen 會警告）、多螢幕混合 DPI 的實機驗證。
+尚未包含：多螢幕混合 DPI 的實機驗證。程式碼簽章使用 Microsoft Trusted Signing（Azure），本機與 CI 都可在有憑證的情況下自動簽署；沒有憑證的建置仍可執行，但會觸發 SmartScreen 警告。
 
 ## 螢幕截圖
 
@@ -64,6 +64,39 @@ wails3 dev
 wails3 build
 # bin/cloudnest.exe
 ```
+
+打包 portable ZIP（會一併簽章，若本機已設定 Trusted Signing）：
+
+```powershell
+pwsh scripts/package-portable.ps1 -Version 0.1.0
+# dist/Cloudnest-0.1.0-win64.zip
+```
+
+### 程式碼簽章（Microsoft Trusted Signing）
+
+`Cloudnest.exe` 在打包時會用 Authenticode 簽署，這樣 Windows 才會顯示可辨識的發行者。簽章步驟是選用的：工具不存在時只警告、照樣產出未簽章的 ZIP。
+
+本機第一次使用時，把工具與帳戶資訊準備好（只需一次）：
+
+```powershell
+pwsh scripts/setup-trusted-signing.ps1 -OutDir "$HOME\lib" `
+  -Endpoint https://eus.codesigning.azure.net/ `
+  -Account <帳戶名稱> -Profile <憑證設定檔名稱>
+```
+
+之後 `scripts/package-portable.ps1` 會自動找到工具並簽章；單獨補簽用 `scripts/sign-windows.ps1 -Files <exe> -Required`。簽完會用 `Get-AuthenticodeSignature` 驗證，狀態不是 `Valid` 就失敗。
+
+CI／Release 要在 GitHub Actions 上簽章時，設定這些 repository secrets（Azure 服務主體需要 Trusted Signing 的簽署者角色）：
+
+| Secret | 說明 |
+|---|---|
+| `TRUSTED_SIGNING_ENDPOINT` | 例如 `https://eus.codesigning.azure.net/` |
+| `TRUSTED_SIGNING_ACCOUNT` | Code Signing 帳戶名稱 |
+| `TRUSTED_SIGNING_PROFILE` | 憑證設定檔名稱 |
+| `TRUSTED_SIGNING_CORRELATION_ID` | 選用，預設同帳戶名稱 |
+| `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` | 服務主體憑證 |
+
+只要 `TRUSTED_SIGNING_ACCOUNT` 沒有設定，工作流程就跳過簽章，維持原本的未簽章產物。
 
 只跑 UI（不需要 Wails / rclone）：
 
@@ -106,6 +139,7 @@ preview/               靜態 UI 預覽 + 截圖
 - **最新正式版**：[Releases](https://github.com/Miku0139oao/cloudnest/releases)（`v*` 標籤觸發）
 - **Nightly**：每次 push 到 `main` 都會重建 [nightly 預發佈](https://github.com/Miku0139oao/cloudnest/releases/tag/nightly)，內容對應最新 commit
 - 兩者都是 portable ZIP：解壓即用，不寫註冊表、沒有安裝程式
+- ZIP 內的 `Cloudnest.exe` 若由有憑證的建置產出，會帶 Authenticode 簽章；可用 `Get-AuthenticodeSignature .\Cloudnest.exe` 檢查發行者
 
 ## 授權與致謝
 

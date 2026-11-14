@@ -17,6 +17,16 @@ jobs:
   portable:
     name: Build portable Windows release
     runs-on: windows-latest
+    env:
+      # Optional Microsoft Trusted Signing; see the CI workflow. Without these
+      # secrets the release is published unsigned.
+      TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+      TRUSTED_SIGNING_ACCOUNT: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
+      TRUSTED_SIGNING_PROFILE: ${{ secrets.TRUSTED_SIGNING_PROFILE }}
+      TRUSTED_SIGNING_CORRELATION_ID: ${{ secrets.TRUSTED_SIGNING_CORRELATION_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
 
     steps:
       - name: Checkout
@@ -54,6 +64,11 @@ jobs:
       - name: Build application
         run: wails3 build
 
+      - name: Set up code signing (optional)
+        if: env.TRUSTED_SIGNING_ACCOUNT != ''
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/setup-trusted-signing.ps1 -OutDir "$env:RUNNER_TEMP\trusted-signing" -WriteGitHubEnv
+
       - name: Package portable ZIP
         shell: pwsh
         env:
@@ -78,7 +93,16 @@ jobs:
             "- No installer: unzip the archive anywhere writable and run Cloudnest.exe.`n" +
             "- Settings, logs and staging files live in the data\ folder next to the executable.`n" +
             "- On Windows 10, if the app does not start, install the WebView2 runtime from runtime\MicrosoftEdgeWebview2Setup.exe.`n" +
-            "- rclone is bundled in bin\rclone.exe. Cloudnest and rclone are MIT licensed (LICENSES\)."
+            "- rclone is bundled in bin\rclone.exe. Cloudnest and rclone are MIT licensed (LICENSES\).`n"
+
+          # Report the real signature state instead of claiming one.
+          $signature = Get-AuthenticodeSignature -LiteralPath 'dist\Cloudnest\Cloudnest.exe'
+          if ($signature.Status -eq 'Valid') {
+            $body += "- Cloudnest.exe is Authenticode-signed by $($signature.SignerCertificate.Subject).`n"
+          }
+          else {
+            $body += "- This build is not Authenticode-signed ($($signature.Status)).`n"
+          }
 
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
             gh release create $tag $zip --title "Cloudnest $tag" --notes $body --verify-tag

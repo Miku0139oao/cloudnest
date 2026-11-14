@@ -11,6 +11,17 @@ jobs:
   windows:
     name: Windows build and test
     runs-on: windows-latest
+    env:
+      # Optional Microsoft Trusted Signing. When these secrets are present the
+      # portable ZIP is Authenticode-signed; a fork or a repository without
+      # them still builds, just unsigned.
+      TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+      TRUSTED_SIGNING_ACCOUNT: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
+      TRUSTED_SIGNING_PROFILE: ${{ secrets.TRUSTED_SIGNING_PROFILE }}
+      TRUSTED_SIGNING_CORRELATION_ID: ${{ secrets.TRUSTED_SIGNING_CORRELATION_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
 
     steps:
       - name: Checkout
@@ -74,6 +85,11 @@ jobs:
 
       # The ZIP is what users actually download, so build it on every run and
       # not only when a release is published.
+      - name: Set up code signing (optional)
+        if: env.TRUSTED_SIGNING_ACCOUNT != ''
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/setup-trusted-signing.ps1 -OutDir "$env:RUNNER_TEMP\trusted-signing" -WriteGitHubEnv
+
       - name: Package portable ZIP
         shell: pwsh
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -Version "ci-$($env:GITHUB_SHA.Substring(0,7))" -SkipBuild

@@ -24,13 +24,22 @@
 
 .PARAMETER SkipBuild
     Do not run wails3 build when bin/cloudnest.exe is missing; fail instead.
+
+.PARAMETER SkipSign
+    Do not Authenticode-sign Cloudnest.exe.
+
+.PARAMETER RequireSign
+    Fail when Microsoft Trusted Signing is not configured. Also enabled by
+    CLOUDNEST_REQUIRE_SIGN=1 (used by the CI release job).
 #>
 [CmdletBinding()]
 param(
     [string]$Version = '0.1.0',
     [string]$OutDir = 'dist',
     [switch]$SkipRclone,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$SkipSign,
+    [switch]$RequireSign
 )
 
 $ErrorActionPreference = 'Stop'
@@ -83,6 +92,26 @@ New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 $TargetExe = Join-Path $PackageDir 'Cloudnest.exe'
 Copy-Item -LiteralPath $SourceExe -Destination $TargetExe -Force
 Write-Host "Copied application to $TargetExe"
+
+# 3b. Sign the shipped executable. This happens after the copy so the build
+# output in bin\ stays exactly as the compiler produced it, and before zipping
+# so the published download carries the signature.
+if ($SkipSign) {
+    Write-Host 'Skipping code signing because -SkipSign was specified.'
+}
+else {
+    $signScript = Join-Path $PSScriptRoot 'sign-windows.ps1'
+    if (-not (Test-Path -LiteralPath $signScript -PathType Leaf)) {
+        if ($RequireSign) { throw "Signing script not found: $signScript" }
+        Write-Warning "Signing script not found at $signScript; shipping an unsigned executable."
+    }
+    else {
+        if (-not $RequireSign -and $env:CLOUDNEST_REQUIRE_SIGN -eq '1') {
+            $RequireSign = $true
+        }
+        & $signScript -Files $TargetExe -Required:$RequireSign
+    }
+}
 
 # 4-6. Fetch third-party files into the package. Downloads go to a unique,
 # empty temp directory; nothing is executed from there.
@@ -253,3 +282,11 @@ Compress-Archive -LiteralPath $PackageDir -DestinationPath $ZipPath -Compression
 $zipSize = (Get-Item -LiteralPath $ZipPath).Length
 Write-Host "Created: $ZipPath"
 Write-Host ("Size: {0:N2} MB" -f ($zipSize / 1MB))
+
+$signature = Get-AuthenticodeSignature -LiteralPath $TargetExe
+if ($signature.Status -eq 'Valid') {
+    Write-Host ("Signed: {0}" -f $signature.SignerCertificate.Subject)
+}
+else {
+    Write-Host ("Signature: {0} (unsigned build; SmartScreen will warn)" -f $signature.Status)
+}
