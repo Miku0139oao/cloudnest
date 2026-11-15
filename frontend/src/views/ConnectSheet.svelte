@@ -73,6 +73,43 @@
       return;
     }
     session = res.id;
+    startPolling();
+    poll();
+  }
+
+  // A retry must resume the original request: the remote name and the OAuth
+  // client (the user's own, when the flow came from the client-ID dialog).
+  // Starting a fresh sign-in here used to create a second account on rclone's
+  // shared client instead.
+  async function retry(): Promise<void> {
+    if (!isWails) {
+      phase = 'waiting';
+      return;
+    }
+    if (!session) {
+      await start();
+      return;
+    }
+    phase = 'starting';
+    error = '';
+    const res = await backend.retryConnect(session);
+    if (!res) {
+      phase = 'failed';
+      error = 'backend unavailable';
+      return;
+    }
+    if (res.err) {
+      phase = 'failed';
+      error = res.err.detail || res.err.message;
+      return;
+    }
+    session = res.id;
+    // The failure which showed the Retry button already cleared the intervals;
+    // without re-arming them the retried sign-in is never observed and the
+    // sheet hangs on "waiting". The previous attempt's URL must not be offered
+    // again either.
+    authUrl = '';
+    startPolling();
     poll();
   }
 
@@ -98,6 +135,19 @@
     }
   }
 
+  // (Re)arms both observation loops. A failed poll clears them, so a retry has
+  // to start them again rather than rely on the mount-time intervals.
+  function startPolling(): void {
+    if (timer) clearInterval(timer);
+    if (watch) clearInterval(watch);
+    timer = setInterval(poll, 700);
+    // The provider's token is saved as soon as rclone exits; watching the
+    // account list makes the sheet finish even if a poll is missed.
+    watch = setInterval(async () => {
+      if (phase === 'waiting' && (await accountAppeared())) await succeed();
+    }, 1200);
+  }
+
   onMount(() => {
     if (app.params.session) {
       session = app.params.session;
@@ -106,12 +156,7 @@
     } else {
       start();
     }
-    timer = setInterval(poll, 700);
-    // The provider's token is saved as soon as rclone exits; watching the
-    // account list makes the sheet finish even if a poll is missed.
-    watch = setInterval(async () => {
-      if (phase === 'waiting' && (await accountAppeared())) await succeed();
-    }, 1200);
+    startPolling();
   });
 
   onDestroy(() => {
@@ -189,7 +234,7 @@
 
     <div class="sheet-foot" style="flex-direction:column;align-items:stretch;gap:8px">
       {#if phase === 'failed'}
-        <button class="btn filled" onclick={start}>{t('common.retry')}</button>
+        <button class="btn filled" onclick={retry}>{t('common.retry')}</button>
       {:else if phase !== 'done'}
         <button class="btn filled" disabled={!authUrl}
           onclick={() => authUrl && backend.openExternal(authUrl)}>

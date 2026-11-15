@@ -95,6 +95,55 @@
       app.notify(res?.err?.message ?? t('sheet.signInFailed'));
     }
   }
+
+  // Using a self-created OAuth client is the only real fix for Drive's
+  // throttled shared client_id. The credentials are handed straight to the
+  // sign-in, which writes them to the remote together with the new token.
+  let clientFor = $state<Account | null>(null);
+  let clientID = $state('');
+  let clientSecret = $state('');
+  let clientBusy = $state(false);
+  let clientError = $state('');
+
+  function openClientDialog(a: Account): void {
+    clientFor = a;
+    clientID = '';
+    clientSecret = '';
+    clientError = '';
+    clientBusy = false;
+  }
+
+  async function signInWithClient(): Promise<void> {
+    // Capture the account before awaiting: the dialog can be dismissed while
+    // the request is in flight, and closing it nulls clientFor.
+    const target = clientFor;
+    if (!target || clientBusy) return;
+    const id = clientID.trim();
+    const secret = clientSecret.trim();
+    if (!id || !secret) {
+      clientError = t('clouds.clientIdRequired');
+      return;
+    }
+    if (!id.endsWith('.apps.googleusercontent.com')) {
+      clientError = t('clouds.clientIdSuffix');
+      return;
+    }
+    clientBusy = true;
+    const res = await backend.beginConnectWithClient(target.provider, target.name, id, secret);
+    clientBusy = false;
+    if (!res || res.err || !res.id) {
+      clientError = res?.err?.detail || res?.err?.message || t('clouds.clientIdFailed');
+      return;
+    }
+    if (clientFor !== target) {
+      // Dismissed mid-call: do not strand an rclone authorize which holds the
+      // callback port for up to ten minutes.
+      await backend.cancelConnect(res.id);
+      return;
+    }
+    clientFor = null;
+    app.go('clouds/oauth', { provider: target.provider, session: res.id });
+  }
 </script>
 
 <div class="scroll">
@@ -178,6 +227,11 @@
             <button type="button" onclick={() => { closeMenu(a.id); relogin(a); }}>
               <Icon name="key" size={18} />{t('clouds.reloginAction')}
             </button>
+            {#if a.provider === 'google'}
+              <button type="button" onclick={() => { closeMenu(a.id); openClientDialog(a); }}>
+                <Icon name="link" size={18} />{a.sharedClientId ? t('clouds.clientId') : t('clouds.clientIdUpdate')}
+              </button>
+            {/if}
             <button type="button" onclick={() => { closeMenu(a.id); openMount(a); }}>
               <Icon name="storage" size={18} />{t('clouds.mount')}
             </button>
@@ -235,8 +289,7 @@
 {/if}
 
 {#if mountFor}
-  <Modal labelledby="mount-title" onclose={() => (mountFor = null)}>
-    <div class="dialog" style="width: 480px">
+  <Modal labelledby="mount-title" onclose={() => (mountFor = null)}>    <div class="dialog" style="width: 480px">
       <div class="dialog-head" style="padding-bottom: 2px">
         <div class="grow">
           <div class="dialog-title" id="mount-title">
@@ -274,6 +327,50 @@
         <button class="btn text" onclick={() => (mountFor = null)}>{t('common.cancel')}</button>
         <button class="btn filled" disabled={!mountLetter || mounting} onclick={doMount}>
           <Icon name="storage" size={18} /><span>{t('clouds.mountAction')}</span>
+        </button>
+      </div>
+    </div>
+  </Modal>
+{/if}
+
+{#if clientFor}
+  <Modal labelledby="client-id-title" onclose={() => (clientFor = null)}>
+    <div class="dialog" style="width: 560px">
+      <div class="dialog-head" style="padding-bottom:2px">
+        <div class="grow">
+          <div class="dialog-title" id="client-id-title">{t('clouds.clientIdTitle')}</div>
+        </div>
+        <button class="icon-button" aria-label={t('common.close')} onclick={() => (clientFor = null)}>
+          <Icon name="close" size={20} />
+        </button>
+      </div>
+      <div class="dialog-body">
+        <p style="margin:4px 0 10px;color:var(--m3c-on-surface-variant)">{t('clouds.clientIdBody')}</p>
+        <button class="btn text sm" style="padding-left:0"
+          onclick={() => backend.openExternal('https://rclone.org/drive/#making-your-own-client-id')}>
+          <Icon name="open-in-new" size={16} /><span>{t('clouds.clientIdGuide')}</span>
+        </button>
+        <div style="margin-top:12px">
+          <div style="margin-bottom:6px;font:var(--type-label-m);color:var(--m3c-on-surface-variant)">{t('clouds.clientIdLabel')}</div>
+          <input class="textfield" style="width:100%;height:40px;border-radius:12px;background:var(--m3c-surface-container-high);border:0;padding:0 12px"
+            bind:value={clientID} placeholder="123456789012-abc.apps.googleusercontent.com"
+            autocomplete="off" spellcheck="false" aria-label={t('clouds.clientIdLabel')} />
+        </div>
+        <div style="margin-top:12px">
+          <div style="margin-bottom:6px;font:var(--type-label-m);color:var(--m3c-on-surface-variant)">{t('clouds.clientSecretLabel')}</div>
+          <input class="textfield" type="password" style="width:100%;height:40px;border-radius:12px;background:var(--m3c-surface-container-high);border:0;padding:0 12px"
+            bind:value={clientSecret} placeholder="GOCSPX-…"
+            autocomplete="off" spellcheck="false" aria-label={t('clouds.clientSecretLabel')} />
+        </div>
+        {#if clientError}
+          <div class="banner" style="margin-top:12px"><Icon name="error" size={20} /><div>{clientError}</div></div>
+        {/if}
+      </div>
+      <div class="dialog-foot">
+        <div class="grow"></div>
+        <button class="btn text" onclick={() => (clientFor = null)}>{t('common.cancel')}</button>
+        <button class="btn filled" disabled={clientBusy} onclick={signInWithClient}>
+          <Icon name="key" size={18} /><span>{t('clouds.clientIdSignIn')}</span>
         </button>
       </div>
     </div>

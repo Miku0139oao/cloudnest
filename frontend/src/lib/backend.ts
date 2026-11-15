@@ -28,7 +28,10 @@ export const backend = {
   removeAccount: (id: string) => safe(() => Service.RemoveAccount(id)),
 
   beginConnect: (provider: string, name: string) => safe(() => Service.BeginConnect(provider, name)),
+  beginConnectWithClient: (provider: string, name: string, clientID: string, clientSecret: string) =>
+    safe(() => Service.BeginConnectWithClient(provider, name, clientID, clientSecret)),
   connectState: (id: string) => safe(() => Service.ConnectState(id)),
+  retryConnect: (session: string) => safe(() => Service.RetryConnect(session)),
   cancelConnect: (id: string) => safe(() => Service.CancelConnect(id)),
 
   listRoots: () => safe(() => Service.ListRoots()),
