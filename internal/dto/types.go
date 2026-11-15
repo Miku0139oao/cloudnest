@@ -264,12 +264,14 @@ type ShareResult struct {
 
 // CheckResult summarises operations/check between two locations.
 type CheckResult struct {
-	Same     int      `json:"same"`
-	Differ   int      `json:"differ"`
-	Missing  int      `json:"missing"`
-	Status   string   `json:"status,omitempty"`
-	Examples []string `json:"examples,omitempty"`
-	Err      *Fail    `json:"err,omitempty"`
+	Same          int      `json:"same"`
+	Differ        int      `json:"differ"`
+	Missing       int      `json:"missing"`
+	Status        string   `json:"status,omitempty"`
+	Examples      []string `json:"examples,omitempty"`
+	Errors        int      `json:"errors,omitempty"`
+	ErrorExamples []string `json:"errorExamples,omitempty"`
+	Err           *Fail    `json:"err,omitempty"`
 }
 
 // MountInfo describes one active rclone mount.

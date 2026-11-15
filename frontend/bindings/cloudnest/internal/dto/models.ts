@@ -222,6 +222,8 @@ export class CheckResult {
     "missing": number;
     "status"?: string;
     "examples"?: string[];
+    "errors"?: number;
+    "errorExamples"?: string[];
     "err"?: Fail | null;
 
     /** Creates a new CheckResult instance. */
@@ -244,13 +246,17 @@ export class CheckResult {
      */
     static createFrom($$source: any = {}): CheckResult {
         const $$createField4_0 = $$createType4;
-        const $$createField5_0 = $$createType3;
+        const $$createField6_0 = $$createType4;
+        const $$createField7_0 = $$createType3;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("examples" in $$parsedSource) {
             $$parsedSource["examples"] = $$createField4_0($$parsedSource["examples"]);
         }
+        if ("errorExamples" in $$parsedSource) {
+            $$parsedSource["errorExamples"] = $$createField6_0($$parsedSource["errorExamples"]);
+        }
         if ("err" in $$parsedSource) {
-            $$parsedSource["err"] = $$createField5_0($$parsedSource["err"]);
+            $$parsedSource["err"] = $$createField7_0($$parsedSource["err"]);
         }
         return new CheckResult($$parsedSource as Partial<CheckResult>);
     }
