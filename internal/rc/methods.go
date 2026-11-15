@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -43,6 +44,22 @@ func (c *Client) Version(ctx context.Context) (*Version, error) {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// cachedVersion returns the core/version response, probing rclone at most once
+// per client. A failed probe is not cached so a later call can retry.
+func (c *Client) cachedVersion(ctx context.Context) (*Version, error) {
+	c.versionMu.Lock()
+	defer c.versionMu.Unlock()
+	if c.version != nil {
+		return c.version, nil
+	}
+	v, err := c.Version(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c.version = v
+	return v, nil
 }
 
 // ListRemotes lists configured remote names. long is forwarded to rclone; on
@@ -205,13 +222,15 @@ func (c *Client) OAuthStop(ctx context.Context, name string) error {
 }
 
 // List lists a directory with operations/list. remote is required by rclone
-// even when listing the root of fs; pass an empty string for the root.
-func (c *Client) List(ctx context.Context, fs, remote string, opt ListOpt) ([]Entry, error) {
+// even when listing the root of fs; pass an empty string for the root. opts
+// configure the underlying Call; pass WithTimeout when a large subtree may
+// need more than DefaultTimeout.
+func (c *Client) List(ctx context.Context, fs, remote string, opt ListOpt, opts ...CallOption) ([]Entry, error) {
 	req := listRequest{Fs: fs, Remote: remote, Opt: opt}
 	var resp struct {
 		List []Entry `json:"list"`
 	}
-	if err := c.Call(ctx, "operations/list", req, &resp); err != nil {
+	if err := c.Call(ctx, "operations/list", req, &resp, opts...); err != nil {
 		return nil, err
 	}
 	return resp.List, nil
@@ -315,7 +334,11 @@ func (c *Client) StartSync(ctx context.Context, kind string, in SyncIn) (int64, 
 		asyncControl:       newAsyncControl(true, group, cfg),
 	}
 	if len(in.Exclude) > 0 {
-		req.Filter = &syncFilter{Exclude: in.Exclude}
+		// Keys are decoded by rclone into its filter Options struct by field
+		// name, so the exclude rules must be ExcludeRule (config "exclude").
+		// An "Exclude" key is silently ignored, which would make the sync
+		// upload and delete files the caller meant to leave alone.
+		req.Filter = &syncFilter{ExcludeRule: in.Exclude, IgnoreCase: true}
 	}
 	var resp struct {
 		JobID int64 `json:"jobid"`
@@ -338,8 +361,13 @@ type syncRequest struct {
 }
 
 // syncFilter is the subset of rclone's _filter group used by StartSync.
+// rclone decodes the group into its filter Options struct by Go field name,
+// which is why the exclude list is ExcludeRule (config name "exclude"), not
+// "Exclude". IgnoreCase matches the planner's case-insensitive matching so the
+// preflight and the sync exclude the same files.
 type syncFilter struct {
-	Exclude []string `json:"Exclude,omitempty"`
+	ExcludeRule []string `json:"ExcludeRule,omitempty"`
+	IgnoreCase  bool     `json:"IgnoreCase,omitempty"`
 }
 
 func syncMethod(kind string) (string, error) {
@@ -455,21 +483,108 @@ func (c *Client) MoveFile(ctx context.Context, in CopyFileIn) error {
 	}, nil)
 }
 
+// hashSumFileMinVersion is the first rclone release that implements the
+// operations/hashsumfile RC method. Cloudnest still supports rclone 1.70, where
+// the method is absent and rclone answers with a "couldn't find method" 404, so
+// the call is version-gated to produce an actionable error instead.
+const (
+	hashSumFileMinMajor = 1
+	hashSumFileMinMinor = 73
+	hashSumFileMinPatch = 0
+)
+
+// ErrHashSumFileUnsupported reports that the running rclone is too old for
+// operations/hashsumfile. Callers can detect it with errors.Is.
+var ErrHashSumFileUnsupported = errors.New("rc: operations/hashsumfile requires rclone v1.73.0 or newer")
+
 // HashSumFile returns the hash of one object. hashType is an rclone hash name
-// such as "sha256" or "md5".
-func (c *Client) HashSumFile(ctx context.Context, fs, remote, hashType string) (string, error) {
+// such as "sha256" or "md5". opts configure the underlying Call; pass
+// WithTimeout when a large object may need more than DefaultTimeout.
+func (c *Client) HashSumFile(ctx context.Context, fs, remote, hashType string, opts ...CallOption) (string, error) {
 	if strings.TrimSpace(fs) == "" || strings.TrimSpace(remote) == "" {
 		return "", errors.New("rc: HashSumFile: fs and remote are required")
+	}
+	if err := c.checkHashSumFile(ctx); err != nil {
+		return "", err
 	}
 	var out struct {
 		Hash     string `json:"hash"`
 		HashType string `json:"hashType"`
 	}
 	req := map[string]string{"fs": fs, "remote": remote, "hashType": hashType}
-	if err := c.Call(ctx, "operations/hashsumfile", req, &out); err != nil {
+	if err := c.Call(ctx, "operations/hashsumfile", req, &out, opts...); err != nil {
 		return "", err
 	}
 	return out.Hash, nil
+}
+
+// checkHashSumFile rejects operations/hashsumfile on rclone builds older than
+// 1.73. The version is probed once per client. When it cannot be determined the
+// call is attempted rather than blocked, so an unrecognised build is not
+// rejected by mistake.
+func (c *Client) checkHashSumFile(ctx context.Context) error {
+	v, err := c.cachedVersion(ctx)
+	if err != nil {
+		return fmt.Errorf("rc: HashSumFile: cannot determine rclone version: %w", err)
+	}
+	major, minor, patch, ok := versionNumbers(v)
+	if !ok {
+		return nil
+	}
+	if versionLess(major, minor, patch, hashSumFileMinMajor, hashSumFileMinMinor, hashSumFileMinPatch) {
+		return fmt.Errorf("%w (running %s)", ErrHashSumFileUnsupported, v.Version)
+	}
+	return nil
+}
+
+// versionLess reports whether version a is older than version b.
+func versionLess(aMajor, aMinor, aPatch, bMajor, bMinor, bPatch int) bool {
+	if aMajor != bMajor {
+		return aMajor < bMajor
+	}
+	if aMinor != bMinor {
+		return aMinor < bMinor
+	}
+	return aPatch < bPatch
+}
+
+// versionNumbers extracts major.minor.patch from a core/version reply, using
+// Decomposed when rclone supplies it and falling back to the version string.
+func versionNumbers(v *Version) (major, minor, patch int, ok bool) {
+	if v == nil {
+		return 0, 0, 0, false
+	}
+	if len(v.Decomposed) >= 3 {
+		return v.Decomposed[0], v.Decomposed[1], v.Decomposed[2], true
+	}
+	parts := strings.SplitN(strings.TrimPrefix(strings.TrimSpace(v.Version), "v"), ".", 3)
+	if len(parts) < 3 {
+		return 0, 0, 0, false
+	}
+	major, okMajor := leadingInt(parts[0])
+	minor, okMinor := leadingInt(parts[1])
+	patch, okPatch := leadingInt(parts[2])
+	if !okMajor || !okMinor || !okPatch {
+		return 0, 0, 0, false
+	}
+	return major, minor, patch, true
+}
+
+// leadingInt parses the leading decimal digits of s, ignoring any version
+// suffix such as "-beta.1234".
+func leadingInt(s string) (int, bool) {
+	end := 0
+	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s[:end])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // PublicLink asks the backend for a share link to one object.

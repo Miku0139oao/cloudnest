@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,6 +25,11 @@ type Client struct {
 	pass       string
 	httpClient *http.Client
 	log        *slog.Logger
+
+	// version caches the core/version reply so capability checks probe rclone
+	// at most once. A failed probe is not cached. Guarded by versionMu.
+	versionMu sync.Mutex
+	version   *Version
 }
 
 // New creates a client for base (for example "http://127.0.0.1:5572").

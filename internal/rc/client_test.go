@@ -280,9 +280,15 @@ func TestStartSyncSendsExcludes(t *testing.T) {
 		if !ok {
 			t.Fatalf("_filter = %v, want map", body["_filter"])
 		}
-		excludes, ok := filter["Exclude"].([]any)
+		excludes, ok := filter["ExcludeRule"].([]any)
 		if !ok || len(excludes) != 2 || excludes[0] != "*.tmp" || excludes[1] != "node_modules" {
-			t.Errorf("Exclude = %#v, want the caller's patterns", filter["Exclude"])
+			t.Errorf("ExcludeRule = %#v, want the caller's patterns", filter["ExcludeRule"])
+		}
+		if filter["IgnoreCase"] != true {
+			t.Errorf("IgnoreCase = %#v, want true so matching follows the planner", filter["IgnoreCase"])
+		}
+		if _, ok := filter["Exclude"]; ok {
+			t.Errorf("_filter carries the unrecognised Exclude key: %#v", filter)
 		}
 		io.WriteString(w, `{"jobid":7}`)
 	})
@@ -428,5 +434,115 @@ func TestStartCopyFileAsync(t *testing.T) {
 	}
 	if jobID != 11 {
 		t.Fatalf("jobID = %d", jobID)
+	}
+}
+
+func TestHashSumFileVersionGate(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		wantOld bool
+	}{
+		{name: "1.70 is too old", version: `{"version":"v1.70.3","decomposed":[1,70,3]}`, wantOld: true},
+		{name: "1.72 is too old", version: `{"version":"v1.72.1","decomposed":[1,72,1]}`, wantOld: true},
+		{name: "1.73.0 works", version: `{"version":"v1.73.0","decomposed":[1,73,0]}`},
+		{name: "version string fallback", version: `{"version":"v1.73.2"}`},
+		{name: "newer works", version: `{"version":"v1.76.0","decomposed":[1,76,0]}`},
+		{name: "suffix is ignored", version: `{"version":"v1.73.0-beta.1234"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var versionCalls, hashCalls int32
+			client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/core/version":
+					atomic.AddInt32(&versionCalls, 1)
+					io.WriteString(w, tc.version)
+				case "/operations/hashsumfile":
+					atomic.AddInt32(&hashCalls, 1)
+					io.WriteString(w, `{"hash":"abc123","hashType":"sha256"}`)
+				default:
+					t.Errorf("unexpected path %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})
+
+			hash, err := client.HashSumFile(context.Background(), "gdrive:backup", "a.txt", "sha256")
+			if tc.wantOld {
+				if !errors.Is(err, ErrHashSumFileUnsupported) {
+					t.Fatalf("HashSumFile() error = %v, want ErrHashSumFileUnsupported", err)
+				}
+				if !strings.Contains(err.Error(), "1.73") {
+					t.Fatalf("error = %q, want it to name the required version", err)
+				}
+				if got := atomic.LoadInt32(&hashCalls); got != 0 {
+					t.Fatalf("operations/hashsumfile calls = %d, want 0 on an old rclone", got)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("HashSumFile: %v", err)
+				}
+				if hash != "abc123" {
+					t.Fatalf("hash = %q, want abc123", hash)
+				}
+				if got := atomic.LoadInt32(&hashCalls); got != 1 {
+					t.Fatalf("operations/hashsumfile calls = %d, want 1", got)
+				}
+			}
+
+			// The version probe is cached: a second call must not ask again.
+			_, _ = client.HashSumFile(context.Background(), "gdrive:backup", "a.txt", "sha256")
+			if got := atomic.LoadInt32(&versionCalls); got != 1 {
+				t.Fatalf("core/version calls = %d, want 1 (cached)", got)
+			}
+		})
+	}
+}
+
+func TestHashSumFileVersionProbeFailure(t *testing.T) {
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/operations/hashsumfile" {
+			t.Error("hashsumfile was called even though the version probe failed")
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		io.WriteString(w, "boom")
+	})
+	_, err := client.HashSumFile(context.Background(), "gdrive:backup", "a.txt", "sha256")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "rclone version") {
+		t.Fatalf("error = %q, want it to mention the version probe", err)
+	}
+}
+
+func TestHashSumFilePassesCallOptions(t *testing.T) {
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/core/version":
+			io.WriteString(w, `{"version":"v1.76.0","decomposed":[1,76,0]}`)
+		case "/operations/hashsumfile":
+			// Hold the reply longer than the short option timeout. With the
+			// 30s default this call would succeed, so a deadline error proves
+			// the option reached Call.
+			time.Sleep(250 * time.Millisecond)
+			io.WriteString(w, `{"hash":"abc123","hashType":"sha256"}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	started := time.Now()
+	_, err := client.HashSumFile(context.Background(), "gdrive:backup", "a.txt", "sha256",
+		WithTimeout(50*time.Millisecond))
+	if err == nil {
+		t.Fatal("HashSumFile succeeded; the CallOption did not reach Call")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("call took %v, want the per-call option timeout", elapsed)
 	}
 }
