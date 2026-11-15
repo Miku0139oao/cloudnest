@@ -231,7 +231,14 @@ export async function refreshHistory(): Promise<void> {
   data.history = res.items.map((r) => ({
     id: r.id,
     kind: r.kind === 'restore' ? 'restore' : 'backup',
-    state: r.state === 'failed' ? 'failed' : r.state === 'cancelled' ? 'cancelled' : 'done',
+    state:
+      r.state === 'failed'
+        ? 'failed'
+        : r.state === 'cancelled'
+          ? 'cancelled'
+          : r.state === 'interrupted'
+            ? 'interrupted'
+            : 'done',
     source: r.title,
     sourceEn: r.title,
     name: r.title,
@@ -316,18 +323,52 @@ export async function refreshRoots(): Promise<string> {
 
 // Resume an interrupted backup from the request stored in the journal. rclone
 // skips files that already arrived, so it only sends the remainder.
+//
+// Resume and dismiss are two entry points for the same banner entry and must
+// not overlap *for that entry*: a dismiss landing while its resume's startBackup
+// is in flight would settle the entry the resume is about to run. The claim is
+// per id (not global): different pending entries may be started independently,
+// so a second retry is never silently reported as started.
+const pendingActionInFlight = new Set<string>();
+
 export async function resumePending(id: string): Promise<boolean> {
+  // A duplicate of the same entry is already being handled; report it as such
+  // without starting a second run.
+  if (pendingActionInFlight.has(id)) return true;
   const entry = data.pendingResume.find((p) => p.id === id);
   if (!entry) return false;
-  const res = (await backend.startBackup(entry.request as never)) as
-    | { err?: unknown }
-    | null;
-  if (!res || res.err) return false;
-  data.pendingResume = data.pendingResume.filter((p) => p.id !== id);
-  return true;
+  pendingActionInFlight.add(id);
+  try {
+    const res = (await backend.startBackup(entry.request as never)) as
+      | { err?: unknown }
+      | null;
+    if (!res || res.err) return false;
+    // The resumed run gets a new job id, so the stored journal entry would stay
+    // "interrupted"/"failed" and be offered again on every launch. Mark it
+    // settled; the backend also settles the matching History record.
+    await backend.dismissResume(id);
+    data.pendingResume = data.pendingResume.filter((p) => p.id !== id);
+    // History rendered the settled row from the old record; reload it so the
+    // row stops offering a Retry for a run which is already being restarted.
+    await refreshHistory();
+    return true;
+  } finally {
+    pendingActionInFlight.delete(id);
+  }
 }
 
-export function dismissPending(id: string): void {
-  data.pendingResume = data.pendingResume.filter((p) => p.id !== id);
-  backend.dismissResume(id);
+// Dismissals claim the same id; without it a double-click on "Not now" could
+// settle the entry a resume is starting for that same entry.
+export async function dismissPending(id: string): Promise<void> {
+  if (pendingActionInFlight.has(id)) return;
+  pendingActionInFlight.add(id);
+  try {
+    data.pendingResume = data.pendingResume.filter((p) => p.id !== id);
+    await backend.dismissResume(id);
+    // Same reload as resumePending: the dismissed row was rendered from History
+    // and would otherwise keep its retryable "interrupted"/"failed" state.
+    await refreshHistory();
+  } finally {
+    pendingActionInFlight.delete(id);
+  }
 }

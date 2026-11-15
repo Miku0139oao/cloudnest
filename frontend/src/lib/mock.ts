@@ -57,7 +57,11 @@ export interface Job {
 export interface HistoryItem {
   id: string;
   kind: 'backup' | 'restore';
-  state: 'done' | 'failed' | 'cancelled';
+  /**
+   * "interrupted" means the run ended but its outcome could not be observed
+   * (for example rclone restarted or purged the job); it is still retryable.
+   */
+  state: 'done' | 'failed' | 'cancelled' | 'interrupted';
   source?: string;
   sourceEn?: string;
   name?: string;
