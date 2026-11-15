@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import Icon from '$lib/components/Icon.svelte';
   import { app } from '$lib/state.svelte';
-  import { t } from '$lib/i18n';
+  import { t, fmtTime } from '$lib/i18n';
   import { appVersion, engineVersion, accountName } from '$lib/mock';
   import { data } from '$lib/data.svelte';
   import { backend, type DTO } from '$lib/backend';
@@ -24,10 +24,28 @@
   let schedAccount = $state('');
   let schedDest = $state('電腦備份');
   let schedMode = $state<'additive' | 'mirror'>('additive');
+  let schedLastRun = $state(0);
+  // Set when a saved schedule has no account but accounts may still be loading;
+  // the effect below fills it in once the account list is available. This must
+  // be reactive, otherwise the effect runs once before accounts load and never
+  // repairs the schedule.
+  let healAccountOnLoad = $state(false);
+
+  // The scheduler only starts when it has both a source and an account. Until
+  // then the switch may be on but enabling the schedule would never run it.
+  const scheduleAccountValid = $derived(
+    !!schedAccount &&
+      (data.accounts.length === 0 || data.accounts.some((a) => a.id === schedAccount))
+  );
+  const scheduleReady = $derived(scheduleAccountValid && !!schedSource);
+  const scheduleCanEnable = $derived(data.accounts.length > 0);
 
   onMount(async () => {
     const s = await backend.getSettings();
-    if (!s) return;
+    if (!s) {
+      schedAccount = data.activeAccount || data.accounts[0]?.id || '';
+      return;
+    }
     transfers = s.backup?.transfers ?? 4;
     autoRetry = s.backup?.autoRetry ?? true;
     fastFiles = s.backup?.fastFiles ?? true;
@@ -40,10 +58,31 @@
       schedEnabled = sch.enabled ?? false;
       schedTime = sch.time || '03:00';
       schedSource = sch.sourcePaths?.[0] ?? '';
-      schedAccount = sch.accountId ?? '';
+      schedAccount = sch.accountId || data.activeAccount || data.accounts[0]?.id || '';
       schedDest = sch.destRoot || '電腦備份';
       schedMode = sch.mode === 'mirror' ? 'mirror' : 'additive';
+      schedLastRun = sch.lastRun ?? 0;
+      // Repair a saved schedule that cannot fire: default it to the active
+      // account, and persist enabled:false when a source is still missing.
+      if (schedEnabled) {
+        if (!schedSource) {
+          void saveSettings(false);
+        } else if (!sch.accountId) {
+          if (schedAccount) void saveSettings(false);
+          else healAccountOnLoad = true;
+        }
+      }
     }
+  });
+
+  $effect(() => {
+    // Read the account state before the early return so the effect tracks it
+    // and re-runs when the list finally populates.
+    const fallback = data.activeAccount || data.accounts[0]?.id || '';
+    if (!healAccountOnLoad || !fallback) return;
+    healAccountOnLoad = false;
+    schedAccount = fallback;
+    void saveSettings(false);
   });
 
   async function pickScheduleSource(): Promise<void> {
@@ -55,28 +94,36 @@
   }
 
   function persist(): void {
+    void saveSettings(true);
+  }
+
+  async function saveSettings(notify: boolean): Promise<void> {
+    // Never persist enabled:true without a source and a valid account; the
+    // backend would keep a schedule that can never start.
     const s: DTO.Settings = {
       language: app.lang,
       theme: app.theme,
       onboarded: true,
       backup: { transfers, bwLimit, autoRetry, fastFiles, partSizeMB: partSize },
       schedule: {
-        enabled: schedEnabled,
+        enabled: schedEnabled && scheduleReady,
         sourcePaths: schedSource ? [schedSource] : [],
         accountId: schedAccount,
         destRoot: schedDest,
         mode: schedMode,
         fastFiles,
         time: schedTime,
-        lastRun: 0
+        lastRun: schedLastRun
       },
       advanced: { proxy, verbose, enginePath: '' },
       window: { width: 0, height: 0, x: 0, y: 0 }
     };
-    backend.saveSettings(s);
+    await backend.saveSettings(s);
     backend.applyBwLimit(bwLimit);
     app.fastFiles = fastFiles;
-    app.notify(t('settings.saved'));
+    if (notify) app.notify(t('settings.saved'));
+    const fresh = await backend.getSettings();
+    if (fresh?.schedule) schedLastRun = fresh.schedule.lastRun ?? schedLastRun;
   }
 
   function resetAll(): void {
@@ -93,6 +140,7 @@
     schedAccount = '';
     schedDest = '電腦備份';
     schedMode = 'additive';
+    schedLastRun = 0;
     persist();
   }
 
@@ -225,9 +273,14 @@
               </div>
               <div class="sc">
                 <input type="checkbox" class="switch" role="switch" bind:checked={schedEnabled}
-                  onchange={persist} />
+                  disabled={!scheduleCanEnable} onchange={persist} />
               </div>
             </div>
+            {#if !scheduleCanEnable}
+              <div class="field-hint" style="padding:0 18px 12px">{t('settings.scheduleNoAccount')}</div>
+            {:else if schedEnabled && !scheduleReady}
+              <div class="field-hint" style="padding:0 18px 12px">{t('settings.scheduleIncomplete')}</div>
+            {/if}
             {#if schedEnabled}
               <div class="set-row">
                 <div class="sl">
@@ -239,6 +292,17 @@
                     bind:value={schedTime} onchange={persist} />
                 </div>
               </div>
+              {#if schedLastRun > 0}
+                <div class="set-row">
+                  <div class="sl">
+                    <div class="st">{t('settings.scheduleLastUpdated')}</div>
+                    <div class="sd">{t('settings.scheduleLastUpdatedSub')}</div>
+                  </div>
+                  <div class="sc">
+                    <span class="nums">{fmtTime(new Date(schedLastRun * 1000))}</span>
+                  </div>
+                </div>
+              {/if}
               <div class="set-row">
                 <div class="sl">
                   <div class="st">{t('settings.scheduleSource')}</div>

@@ -25,25 +25,108 @@
   let showDeletions = $state(false);
   let folderPicker = $state(false);
   let verifying = $state(false);
-  let verifyResult = $state<{ differ: number; missing: number; examples?: string[] } | null>(null);
+  let verifyResult = $state<{
+    differ: number;
+    missing: number;
+    examples?: string[];
+    status?: string;
+    errors?: number;
+  } | null>(null);
 
-  // Runs rclone check between the source folder and the destination folder of
-  // the backup that just finished.
+  // rclone reports a check that couldn't read or hash files as
+  // "N errors while checking" with no differ/missing entries; never present
+  // that as a complete backup.
+  function verifyErrorCount(r: { errors?: number; status?: string }): number {
+    if (r.errors && r.errors > 0) return r.errors;
+    const m = /(\d+)\s+errors?\b/i.exec(r.status ?? '');
+    return m ? Number(m[1]) : 0;
+  }
+
+  function verifyStatusOk(
+    status: string | undefined,
+    differ: number,
+    missing: number,
+    errors: number
+  ): boolean {
+    // The counts are authoritative. The backend deliberately keeps rclone's
+    // "N differences found" string for a reconciled split backup and zeroes
+    // the counts, so the status text alone must not decide the verdict.
+    if (errors > 0 || differ > 0 || missing > 0) return false;
+    const s = (status ?? '').trim().toLowerCase();
+    if (!s) return true;
+    if (s.includes('split uploads verified') || s.includes('split upload verified')) return true;
+    if (s.includes('could not') || s.includes('did not complete')) return false;
+    // Successful checks can carry descriptive statuses ("identical by size").
+    // Only explicit failure wording means the check did not complete.
+    return !(
+      /\d+\s+errors?\b/.test(s) ||
+      s.includes('error') ||
+      s.includes('differences found')
+    );
+  }
+
+  const verifyErrors = $derived(verifyResult ? verifyErrorCount(verifyResult) : 0);
+  const verifyStatusFailed = $derived(
+    !!verifyResult &&
+      !verifyStatusOk(
+        verifyResult.status,
+        verifyResult.differ,
+        verifyResult.missing,
+        verifyErrors
+      )
+  );
+
+  // Runs rclone check for every source the backup used: a folder is compared
+  // as a tree, while each selected file is compared against its own object
+  // (passing a file's parent folder would report unrelated siblings missing).
   async function verifyNow(): Promise<void> {
     if (!isWails || app.sourcePaths.length === 0) return;
     verifying = true;
-    const res = (await backend.verifyBackup(app.account, app.sourcePaths[0], app.destRoot)) as
-      | { differ?: number; missing?: number; examples?: string[]; err?: { message?: string; detail?: string } }
-      | null;
+    let differ = 0;
+    let missing = 0;
+    let errors = 0;
+    let status = 'success';
+    let failureStatus = '';
+    const examples: string[] = [];
+    let failure = '';
+    for (const src of app.sourcePaths) {
+      const res = (await backend.verifyBackup(app.account, src, app.destRoot)) as
+        | {
+            differ?: number;
+            missing?: number;
+            examples?: string[];
+            status?: string;
+            errors?: number;
+            err?: { message?: string; detail?: string };
+          }
+        | null;
+      if (!res || res.err) {
+        failure = res?.err?.detail || res?.err?.message || t('files.verify');
+        break;
+      }
+      const resDiffer = res.differ ?? 0;
+      const resMissing = res.missing ?? 0;
+      const resErrors = verifyErrorCount(res);
+      differ += resDiffer;
+      missing += resMissing;
+      errors += resErrors;
+      if (!verifyStatusOk(res.status, resDiffer, resMissing, resErrors) && !failureStatus) {
+        failureStatus = res.status || 'verification did not complete';
+      }
+      examples.push(...(res.examples ?? []));
+      if (res.status) status = res.status;
+    }
     verifying = false;
-    if (!res || res.err) {
-      app.notify(res?.err?.detail || res?.err?.message || t('files.verify'));
+    if (failure) {
+      app.notify(failure);
       return;
     }
     verifyResult = {
-      differ: res.differ ?? 0,
-      missing: res.missing ?? 0,
-      examples: res.examples ?? []
+      differ,
+      missing,
+      examples: examples.slice(0, 5),
+      status: failureStatus || status,
+      errors
     };
   }
 
@@ -81,14 +164,34 @@
   }
 
   const jobPaused = $derived(liveJob?.state === 'paused');
+  // Pause/Resume and Retry both call the backend for the same job; a
+  // double-click would reach ResumeJob twice and surface its duplicate-start
+  // refusal as a false failure.
+  let actionBusy = $state(false);
+  // Start is the only wizard action which creates a new job; guard it too.
+  let starting = $state(false);
 
   async function togglePause(): Promise<void> {
-    if (!app.activeJobId) return;
-    if (jobPaused) await backend.resumeJob(app.activeJobId);
-    else await backend.pauseJob(app.activeJobId);
-    await refreshJobs();
-    const found = data.jobs.find((j) => j.id === app.activeJobId);
-    if (found) liveJob = found;
+    if (!app.activeJobId || actionBusy) return;
+    actionBusy = true;
+    try {
+      if (jobPaused) {
+        const res = await backend.resumeJob(app.activeJobId);
+        // ResumeJob refuses with a reason while the previous run is still
+        // winding down; show it instead of silently leaving the card paused.
+        if (res?.err) {
+          app.notify(res.err.detail || res.err.message || t('progress.resumeFailed'));
+          return;
+        }
+      } else {
+        await backend.pauseJob(app.activeJobId);
+      }
+      await refreshJobs();
+      const found = data.jobs.find((j) => j.id === app.activeJobId);
+      if (found) liveJob = found;
+    } finally {
+      actionBusy = false;
+    }
   }
 
   interface PlanView {
@@ -102,26 +205,68 @@
   }
   let plan = $state<PlanView | null>(null);
   let planLoading = $state(false);
+  // A failed plan must never read as "0 files will be deleted": that is a
+  // destructive mirror decision. Keep the error and block Start until a real
+  // plan exists.
+  let planError = $state('');
+
+  // Mirror syncs one folder into destRoot/<folder>; a file set (or several
+  // folders) is copied item by item, so Plan refuses mirror for it, and a
+  // drive root has no folder name to sync into. Offer the mode only where it
+  // can actually run, and fall back to additive when the source changes
+  // underneath a persisted mirror selection.
+  //
+  // sourceChoice is written only by the pickers on success (never by the radio
+  // itself), so a cancelled dialog cannot leave the flag describing a source
+  // that is not selected.
+  function isDriveRoot(p: string): boolean {
+    return /^[A-Za-z]:[\\/]*$/.test(p.trim());
+  }
+  const canMirror = $derived(
+    app.sourceChoice === 'folder' && app.sourcePaths.length === 1 && !isDriveRoot(app.sourcePaths[0])
+  );
+  $effect(() => {
+    if (!canMirror && app.mirrorMode) app.mirrorMode = false;
+  });
+
+  let planSeq = 0;
 
   async function computePlan(): Promise<void> {
     if (!isWails || app.sourcePaths.length === 0) return;
+    const seq = ++planSeq;
     planLoading = true;
-    const res = (await backend.plan({
-      sourcePaths: app.sourcePaths,
-      accountId: app.account,
-      destRoot: app.destRoot,
-      mode: mirror ? 'mirror' : 'additive',
-      fastFiles: app.fastFiles,
-      transfers: 4,
-      excludes: app.excludes
-    })) as { plan?: PlanView } | null;
-    plan = res?.plan ?? null;
-    planLoading = false;
+    planError = '';
+    try {
+      const res = (await backend.plan({
+        sourcePaths: app.sourcePaths,
+        accountId: app.account,
+        destRoot: app.destRoot,
+        mode: mirror && canMirror ? 'mirror' : 'additive',
+        fastFiles: app.fastFiles,
+        transfers: 4,
+        excludes: app.excludes
+      })) as { plan?: PlanView; err?: { code?: string; message?: string; detail?: string } } | null;
+      // A slower earlier response must not replace the newest plan or error.
+      if (seq !== planSeq) return;
+      if (!res || res.err || !res.plan) {
+        plan = null;
+        planError =
+          res?.err?.detail ||
+          (res?.err?.code === 'provider_unsupported'
+            ? t('wizard.s3.modeMirrorFolderOnly')
+            : res?.err?.message) ||
+          t('wizard.s3.planFailed');
+        return;
+      }
+      plan = res.plan;
+    } finally {
+      if (seq === planSeq) planLoading = false;
+    }
   }
 
   $effect(() => {
     const s = step;
-    const m = mirror;
+    const m = mirror && canMirror;
     const count = app.sourcePaths.length;
     if (s !== 3 || !count || !isWails) return;
     computePlan();
@@ -168,78 +313,111 @@
     ['music', 'files.root.music', 'music-note']
   ] as const;
 
+  // One click on a source card can reach its picker twice: the label's own
+  // click handler runs, and the browser's label activation also dispatches a
+  // click from the nested radio which bubbles back to the label. Without a
+  // guard both calls request a native dialog.
+  let picking = $state(false);
+
   async function pickSource(): Promise<void> {
-    const picked = await backend.chooseFolder(t('wizard.s1.folder'));
-    if (!picked?.path) {
-      if (!isWails) app.notify(t('wizard.s1.folder'));
-      return;
-    }
-    app.sourcePaths = [picked.path];
-    app.sourceName = picked.path.split(/[\\/]/).filter(Boolean).pop() ?? picked.path;
-    app.sourceChoice = 'folder';
-    const m = await backend.measure(picked.path);
-    if (m) {
-      app.sourceFiles = m.files;
-      app.sourceBytes = m.bytes;
-      app.sourceEstimated = m.estimated;
+    if (picking) return;
+    picking = true;
+    try {
+      const picked = await backend.chooseFolder(t('wizard.s1.folder'));
+      if (!picked?.path) {
+        if (!isWails) app.notify(t('wizard.s1.folder'));
+        return;
+      }
+      app.sourcePaths = [picked.path];
+      app.sourceName = picked.path.split(/[\\/]/).filter(Boolean).pop() ?? picked.path;
+      app.sourceChoice = 'folder';
+      const m = await backend.measure(picked.path);
+      if (m) {
+        app.sourceFiles = m.files;
+        app.sourceBytes = m.bytes;
+        app.sourceEstimated = m.estimated;
+      }
+    } finally {
+      picking = false;
     }
   }
 
   async function pickFiles(): Promise<void> {
-    const picked = await backend.chooseFiles(t('wizard.s1.files'));
-    if (!picked?.paths?.length) {
-      if (!isWails) app.notify(t('wizard.s1.files'));
-      return;
-    }
-    app.sourcePaths = picked.paths;
-    app.sourceChoice = 'files';
-    app.sourceName =
-      picked.paths.length === 1
-        ? (picked.paths[0].split(/[\\/]/).filter(Boolean).pop() ?? picked.paths[0])
-        : '';
-    let files = 0;
-    let bytes = 0;
-    let estimated = false;
-    for (const p of picked.paths) {
-      const m = await backend.measure(p);
-      if (m) {
-        files += m.files;
-        bytes += m.bytes;
-        estimated = estimated || m.estimated;
+    if (picking) return;
+    picking = true;
+    try {
+      const picked = await backend.chooseFiles(t('wizard.s1.files'));
+      if (!picked?.paths?.length) {
+        if (!isWails) app.notify(t('wizard.s1.files'));
+        return;
       }
+      app.sourcePaths = picked.paths;
+      app.sourceChoice = 'files';
+      app.sourceName =
+        picked.paths.length === 1
+          ? (picked.paths[0].split(/[\\/]/).filter(Boolean).pop() ?? picked.paths[0])
+          : '';
+      let files = 0;
+      let bytes = 0;
+      let estimated = false;
+      for (const p of picked.paths) {
+        const m = await backend.measure(p);
+        if (m) {
+          files += m.files;
+          bytes += m.bytes;
+          estimated = estimated || m.estimated;
+        }
+      }
+      app.sourceFiles = files;
+      app.sourceBytes = bytes;
+      app.sourceEstimated = estimated;
+    } finally {
+      picking = false;
     }
-    app.sourceFiles = files;
-    app.sourceBytes = bytes;
-    app.sourceEstimated = estimated;
   }
 
   async function startBackup(): Promise<void> {
+    // The Start button stays mounted until the IPC call resolves and
+    // StartBackup mints a new job for every call, so a double-click would run
+    // two independent backups over the same destination.
+    if (starting) return;
     if (!isWails) {
       app.go('wizard/progress');
       return;
     }
-    if (app.sourcePaths.length === 0) {
-      await pickSource();
-      if (app.sourcePaths.length === 0) return;
-    }
-    const res = await backend.startBackup({
-      sourcePaths: app.sourcePaths,
-      accountId: app.account,
-      destRoot: app.destRoot,
-      mode: mirror ? 'mirror' : 'additive',
-      fastFiles: app.fastFiles,
-      transfers: 4,
-      excludes: app.excludes
-    });
-    if (!res || res.err) {
-      app.notify(res?.err?.detail || res?.err?.message || 'backup failed');
+    // Never start a destructive mirror sync whose deletion count was never
+    // computed: the failed plan would otherwise read as "0 files deleted".
+    if (mirror && (!canMirror || !plan || planError)) {
+      app.notify(!canMirror ? t('wizard.s3.modeMirrorFolderOnly') : planError || t('wizard.s3.planFailed'));
       return;
     }
-    app.activeJobId = res.id;
-    completed = false;
-    verifyResult = null;
-    liveJob = null;
-    app.go('wizard/progress');
+    starting = true;
+    try {
+      if (app.sourcePaths.length === 0) {
+        await pickSource();
+        if (app.sourcePaths.length === 0) return;
+      }
+      const res = await backend.startBackup({
+        sourcePaths: app.sourcePaths,
+        accountId: app.account,
+        destRoot: app.destRoot,
+        mode: mirror && canMirror ? 'mirror' : 'additive',
+        fastFiles: app.fastFiles,
+        transfers: 4,
+        excludes: app.excludes
+      });
+      if (!res || res.err) {
+        app.notify(res?.err?.detail || res?.err?.message || 'backup failed');
+        return;
+      }
+      app.activeJobId = res.id;
+      completed = false;
+      verifyResult = null;
+      liveJob = null;
+      app.go('wizard/progress');
+    } finally {
+      starting = false;
+    }
   }
 
   $effect(() => {
@@ -249,10 +427,14 @@
       await refreshJobs();
       const found = data.jobs.find((j) => j.id === app.activeJobId);
       if (found) {
-        if (found.state === 'failed') {
+        if (found.state === 'failed' || found.state === 'interrupted') {
           // A failed job used to look identical to a finished one: the wizard
-          // showed "backup complete" because the job simply disappeared.
-          finishError = found.error || t('progress.failedUnknown');
+          // showed "backup complete" because the job simply disappeared. An
+          // interrupted job has the same rule: its outcome was never observed,
+          // so it must never render as a success either.
+          finishError =
+            found.error ||
+            t(found.state === 'interrupted' ? 'progress.interrupted' : 'progress.failedUnknown');
           liveJob = null;
           refreshHistory();
           return;
@@ -262,8 +444,10 @@
         liveJob = null;
         await refreshHistory();
         const rec = data.history.find((r) => r.id === app.activeJobId);
-        if (rec?.state === 'failed') {
-          finishError = rec.error || t('progress.failedUnknown');
+        if (rec?.state === 'failed' || rec?.state === 'interrupted') {
+          finishError =
+            rec.error ||
+            t(rec.state === 'interrupted' ? 'progress.interrupted' : 'progress.failedUnknown');
         } else {
           completed = true;
         }
@@ -273,11 +457,21 @@
   });
 
   async function retryBackup(): Promise<void> {
-    if (!app.activeJobId) return;
-    finishError = '';
-    completed = false;
-    await backend.resumeJob(app.activeJobId);
-    await refreshJobs();
+    if (!app.activeJobId || actionBusy) return;
+    actionBusy = true;
+    try {
+      const res = await backend.resumeJob(app.activeJobId);
+      // A refused retry must not wipe the failure banner and then do nothing.
+      if (res?.err) {
+        app.notify(res.err.detail || res.err.message || t('progress.resumeFailed'));
+        return;
+      }
+      finishError = '';
+      completed = false;
+      await refreshJobs();
+    } finally {
+      actionBusy = false;
+    }
   }
 
   function next(): void {
@@ -341,9 +535,9 @@
               {#if verifyResult}
                 <div class="tech" style="margin-top:14px;text-align:left;width:100%">
                   <div class="tech-title">{t('files.verifyTitle')}</div>
-                  {#if verifyResult.differ === 0 && verifyResult.missing === 0}
-                    <div>{t('files.verifySameBody')}</div>
-                  {:else}
+                  {#if verifyErrors > 0}
+                    <div>{t('files.verifyErrorBody', { n: verifyErrors })}</div>
+                  {:else if verifyResult.differ || verifyResult.missing}
                     <div>{t('files.verifyDifferBody')}</div>
                     <div class="nums" style="margin-top:6px">
                       {t('files.differ')}: {verifyResult.differ} · {t('files.missing')}: {verifyResult.missing}
@@ -351,6 +545,10 @@
                     {#if verifyResult.examples?.length}
                       <pre>{verifyResult.examples.slice(0, 5).join('\n')}</pre>
                     {/if}
+                  {:else if verifyStatusFailed}
+                    <div>{t('files.verifyIncompleteBody', { status: verifyResult.status || '—' })}</div>
+                  {:else}
+                    <div>{t('files.verifySameBody')}</div>
                   {/if}
                 </div>
               {:else}
@@ -404,7 +602,8 @@
             <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
             <label class="option big" class:selected={app.sourceChoice === 'folder'} onclick={pickSource}>
               <input type="radio" name="wiz-source" checked={app.sourceChoice === 'folder'}
-                onchange={() => (app.sourceChoice = 'folder')} />
+                onclick={(e) => e.preventDefault()}
+                onkeydown={(e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); pickSource(); } }} />
               <Icon name="folder" size={26} />
               <span class="t">{t('wizard.s1.folder')}</span>
               <span class="d">{t('wizard.s1.folderSub')}</span>
@@ -413,7 +612,8 @@
             <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
             <label class="option big" class:selected={app.sourceChoice === 'files'} onclick={pickFiles}>
               <input type="radio" name="wiz-source" checked={app.sourceChoice === 'files'}
-                onchange={() => (app.sourceChoice = 'files')} />
+                onclick={(e) => e.preventDefault()}
+                onkeydown={(e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); pickFiles(); } }} />
               <Icon name="description" size={26} />
               <span class="t">{t('wizard.s1.files')}</span>
               <span class="d">{t('wizard.s1.filesSub')}</span>
@@ -514,11 +714,13 @@
                 <div class="md">{t('wizard.s3.modeAddSub')}</div>
               </div>
             </label>
-            <label class="mode" class:selected={mirror}>
-              <input type="radio" name="wiz-mode" checked={mirror} onchange={() => setMirror(true)} />
+            <label class="mode" class:selected={mirror} class:disabled={!canMirror}>
+              <input type="radio" name="wiz-mode" checked={mirror} disabled={!canMirror}
+                onchange={() => setMirror(true)} />
               <div>
                 <div class="mt">{t('wizard.s3.modeMirror')}</div>
                 <div class="md">{t('wizard.s3.modeMirrorSub')}</div>
+                {#if !canMirror}<div class="md">{t('wizard.s3.modeMirrorFolderOnly')}</div>{/if}
               </div>
             </label>
           </div>
@@ -530,6 +732,8 @@
                 <div class="wt">
                   {#if planLoading}
                     {t('wizard.s3.calculating')}
+                  {:else if planError}
+                    {planError}
                   {:else}
                     {t('wizard.s3.warnTitle', {
                       files: summaryDeleteCount.toLocaleString('en-US'),
@@ -537,10 +741,16 @@
                     })}
                   {/if}
                 </div>
-                <button class="btn text sm" style="padding-left:0;color:inherit"
-                  onclick={() => (showDeletions = !showDeletions)}>
-                  {t('wizard.s3.warnView')}
-                </button>
+                {#if planError}
+                  <button class="btn text sm" style="padding-left:0;color:inherit" onclick={computePlan}>
+                    {t('wizard.s3.planRetry')}
+                  </button>
+                {:else}
+                  <button class="btn text sm" style="padding-left:0;color:inherit"
+                    onclick={() => (showDeletions = !showDeletions)}>
+                    {t('wizard.s3.warnView')}
+                  </button>
+                {/if}
                 {#if showDeletions && plan?.deletions?.length}
                   <div style="max-height:150px;overflow:auto;margin:4px 0 8px;font:var(--type-body-s)">
                     {#each plan.deletions.slice(0, 100) as d (d.path)}
@@ -610,12 +820,12 @@
             <button class="btn filled" onclick={() => app.closeOverlay()}>{t('common.done')}</button>
           {:else if finishError}
             <button class="btn text" onclick={() => app.closeOverlay()}>{t('common.close')}</button>
-            <button class="btn filled" onclick={retryBackup}>
+            <button class="btn filled" onclick={retryBackup} disabled={actionBusy}>
               <Icon name="refresh" size={18} /><span>{t('common.retry')}</span>
             </button>
           {:else}
-            <button class="btn tonal" onclick={togglePause}>
-              <Icon name={jobPaused ? 'play' : 'pause'} size={18} />
+            <button class="btn tonal" onclick={togglePause} disabled={actionBusy}>
+              <Icon name={jobPaused ? 'play-arrow' : 'pause'} size={18} />
               <span>{jobPaused ? t('activity.resume') : t('activity.pause')}</span>
             </button>
             {#if jobPaused}
@@ -635,7 +845,7 @@
           <button class="btn filled" autofocus onclick={next}>{t('common.next')}</button>
         {:else}
           <!-- svelte-ignore a11y_autofocus -->
-          <button class="btn filled" autofocus={!startDisabled} disabled={startDisabled || (mirror && planLoading)}
+          <button class="btn filled" autofocus={!startDisabled} disabled={startDisabled || starting || (mirror && (planLoading || !!planError))}
             onclick={startBackup}>
             <Icon name="cloud-upload" size={18} /><span>{t('wizard.s3.start')}</span>
           </button>

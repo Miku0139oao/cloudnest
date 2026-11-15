@@ -57,6 +57,7 @@
     differ: number;
     missing: number;
     status?: string;
+    errors?: number;
     examples?: string[];
     err?: FailLike | null;
   }
@@ -86,7 +87,9 @@
   let destOpen = $state<{ mode: DestMode; kind: PaneKind; entries: Entry[] } | null>(null);
   let destChoice = $state<'current' | 'account' | 'folder'>('current');
   let destAccount = $state('');
-  let destFolder = $state('');
+  // null means "no folder picked yet"; '' is the cloud account root, which is a
+  // valid destination and must not be confused with an empty selection.
+  let destFolder = $state<string | null>(null);
   let destError = $state('');
   let destBusy = $state(false);
   let pickerFor = $state<'dest' | 'verify' | null>(null);
@@ -98,6 +101,7 @@
   let detailData = $state<{ name: string; size: number; mod: Date; sha256: string; md5: string } | null>(null);
   let copiedField = $state<'sha256' | 'md5' | ''>('');
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
+  let detailSeq = 0;
 
   // Share link -------------------------------------------------------------
   let shareEntry = $state<Entry | null>(null);
@@ -106,6 +110,7 @@
   let shareLoading = $state(false);
   let shareCopied = $state(false);
   let shareTimer: ReturnType<typeof setTimeout> | undefined;
+  let shareSeq = 0;
 
   // Empty trash ------------------------------------------------------------
   let cleanupOpen = $state(false);
@@ -117,7 +122,12 @@
   let verifyRoot = $state('');
   let verifyBusy = $state(false);
   let verifyError = $state('');
-  let verifyResult = $state<Required<Pick<CheckRes, 'same' | 'differ' | 'missing' | 'examples'>> & { status: string } | null>(null);
+  let verifyResult = $state<
+    Required<Pick<CheckRes, 'same' | 'differ' | 'missing' | 'examples'>> & { status: string; errors: number }
+  | null>(null);
+  // A slow verify for one source/destination must not repaint the dialog that
+  // has since been retargeted (or reopened) for another.
+  let verifySeq = 0;
 
   // Whole-cloud search -----------------------------------------------------
   let searchOpen = $state(false);
@@ -126,6 +136,7 @@
   let searchQuery = $state('');
   let searchHits = $state<SearchHitView[]>([]);
   let searchTruncated = $state(false);
+  let searchSeq = 0;
 
   const account = $derived<Account | undefined>(
     data.accounts.find((a) => a.id === data.activeAccount) ?? data.accounts[0]
@@ -245,12 +256,42 @@
     [...selectedLocal, ...selectedCloud].reduce((s, e) => s + (e.size || 0), 0)
   );
 
+  function isWindowsHost(): boolean {
+    return typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent);
+  }
+
+  // Only local paths follow the host's case folding. Cloud backends may be
+  // case-sensitive, where "report.pdf" and "Report.pdf" are distinct objects,
+  // so a case-only difference is a valid remote name and must not be blocked.
+  function sameName(kind: PaneKind, a: string, b: string): boolean {
+    if (kind === 'local') {
+      return isWindowsHost() ? a.toLowerCase() === b.toLowerCase() : a === b;
+    }
+    return a === b;
+  }
+
+  function paneEntries(kind: PaneKind): Entry[] {
+    return kind === 'cloud' ? data.cloudFiles : data.localFiles;
+  }
+
+  function paneHasName(kind: PaneKind, name: string, self: Entry): boolean {
+    const selfKey = self.path ?? self.id;
+    return paneEntries(kind).some(
+      (e) => (e.path ?? e.id) !== selfKey && sameName(kind, e.name, name)
+    );
+  }
+
   const renameValidation = $derived.by(() => {
     if (!renameTarget) return '';
     const name = renameName.trim();
     if (!name) return t('files.nameRequired');
     if (name === '.' || name === '..' || /[\\/:*?"<>|]/.test(name)) {
       return t('files.nameInvalid');
+    }
+    // Both backends replace an existing destination silently; refuse here
+    // instead of losing the other file.
+    if (paneHasName(renameTarget.kind, name, renameTarget.entry)) {
+      return t('files.nameExists');
     }
     return '';
   });
@@ -266,9 +307,9 @@
 
   const destResolvedDir = $derived.by(() => {
     if (!destOpen) return '';
-    if (destOpen.kind === 'local') return destFolder;
+    if (destOpen.kind === 'local') return destFolder ?? '';
     if (destChoice === 'current') return data.cloudPath;
-    if (destChoice === 'folder') return destFolder;
+    if (destChoice === 'folder') return destFolder ?? '';
     return '';
   });
 
@@ -282,21 +323,23 @@
   const destValid = $derived.by(() => {
     if (!destOpen) return false;
     if (destOpen.kind === 'local') {
-      return !!destFolder && !sameLocalPath(destFolder, data.localPath);
+      return destFolder !== null && !sameLocalPath(destFolder, data.localPath);
     }
     if (destChoice === 'account') {
       return !!destAccount && destAccount !== destSourceAccount;
     }
     if (destChoice === 'folder') {
-      return !!destFolder && destFolder !== data.cloudPath;
+      return destFolder !== null && destFolder !== data.cloudPath;
     }
-    return destOpen.mode === 'move';
+    // Moving into the folder the files already live in is a no-op that rclone
+    // reports as done; there is no destination to confirm.
+    return false;
   });
 
   const destHint = $derived.by(() => {
     if (!destOpen) return '';
     if (destOpen.kind === 'local') {
-      if (!destFolder) return t('files.chooseFolderFirst');
+      if (destFolder === null) return t('files.chooseFolderFirst');
       if (sameLocalPath(destFolder, data.localPath)) return t('files.sameFolder');
       return '';
     }
@@ -304,7 +347,7 @@
       return t('files.copyNeedsOther');
     }
     if (destChoice === 'folder') {
-      if (!destFolder) return t('files.chooseFolderFirst');
+      if (destFolder === null) return t('files.chooseFolderFirst');
       if (destFolder === data.cloudPath) return t('files.sameFolder');
     }
     return '';
@@ -570,15 +613,17 @@
     destOpen = { mode, kind, entries };
     destError = '';
     destBusy = false;
-    destFolder = '';
+    destFolder = null;
     destAccount = account?.id ?? '';
     if (kind === 'local') {
       destChoice = 'folder';
       return;
     }
     if (mode === 'move') {
-      destChoice = 'current';
-      destFolder = data.cloudPath;
+      // Never preselect the source folder: a self-move is reported as success
+      // without moving anything. Make the user pick a real destination.
+      destChoice = 'folder';
+      destFolder = null;
       return;
     }
     const other = data.accounts.find((a) => a.id !== account?.id);
@@ -600,7 +645,7 @@
       destFolder = data.cloudPath;
     } else if (choice === 'account') {
       destAccount = data.accounts.find((a) => a.id !== account?.id)?.id ?? '';
-      destFolder = '';
+      destFolder = null;
     } else {
       destAccount = account?.id ?? '';
       destFolder = data.cloudPath;
@@ -616,6 +661,33 @@
     }
   }
 
+  async function listDestination(
+    kind: PaneKind,
+    accountID: string,
+    dir: string
+  ): Promise<{ name: string }[]> {
+    if (!isWails) return [];
+    if (kind === 'local') {
+      const res = (await backend.listLocal(dir)) as { entries?: { name: string }[] } | null;
+      return res?.entries ?? [];
+    }
+    const res = (await backend.listCloud(accountID, dir)) as
+      | { entries?: { name: string }[] }
+      | null;
+    return res?.entries ?? [];
+  }
+
+  async function moveConflicts(
+    entries: Entry[],
+    kind: PaneKind,
+    accountID: string,
+    dir: string
+  ): Promise<string[]> {
+    const listing = await listDestination(kind, accountID, dir);
+    if (listing.length === 0) return [];
+    return entries.map((e) => e.name).filter((name) => listing.some((x) => sameName(kind, x.name, name)));
+  }
+
   async function submitDest(): Promise<void> {
     if (!destOpen || !destValid || destBusy) return;
     const op = destOpen;
@@ -624,7 +696,15 @@
     destError = '';
     try {
       if (op.kind === 'local') {
-        const res = (await backend.moveLocal(paths, destFolder)) as OpRes | null;
+        const dir = destFolder ?? '';
+        // A move replaces a same-named file on both backends; refuse before
+        // the user loses the destination copy.
+        const conflicts = await moveConflicts(op.entries, 'local', '', dir);
+        if (conflicts.length) {
+          destError = t('files.destExists', { name: conflicts[0] });
+          return;
+        }
+        const res = (await backend.moveLocal(paths, dir)) as OpRes | null;
         if (res?.err) {
           destError = failText(res.err);
           return;
@@ -643,6 +723,15 @@
       const src = destSourceAccount;
       const dst = destResolvedAccount;
       const dir = destResolvedDir;
+
+      // Both copy and move replace a same-named destination object on the
+      // remote, so refuse before the older copy is lost. This also covers a
+      // move to another account, which is performed as a copy.
+      const conflicts = await moveConflicts(op.entries, 'cloud', dst, dir);
+      if (conflicts.length) {
+        destError = t('files.destExists', { name: conflicts[0] });
+        return;
+      }
 
       if (destCopyOnly) {
         const res = (await backend.copyCloud(src, paths, dst, dir)) as OpRes | null;
@@ -701,6 +790,9 @@
   }
 
   async function openDetail(entry: Entry): Promise<void> {
+    // Hashing can take minutes; a slow answer for a previous file must not
+    // repaint the dialog now showing another entry.
+    const seq = ++detailSeq;
     detailEntry = entry;
     detailData = null;
     detailError = '';
@@ -719,19 +811,23 @@
     if (!account) return;
     detailLoading = true;
     const res = (await backend.fileDetail(account.id, entry.path ?? entry.id)) as DetailRes | null;
+    if (seq !== detailSeq || detailEntry !== entry) return;
     detailLoading = false;
     if (!res) {
       detailError = t('files.backendError');
       return;
     }
-    if (res.err) {
+    // Hashing is optional: clouds without SHA-256 (Drive, OneDrive, S3, …)
+    // still return the stat metadata. Only a failure that left no metadata is
+    // fatal; otherwise show the details and an "unavailable" note for hashes.
+    if (res.err && !res.name) {
       detailError = failText(res.err);
       return;
     }
     detailData = {
-      name: res.name,
-      size: res.size,
-      mod: new Date(res.modTime),
+      name: res.name || entry.name,
+      size: res.size ?? entry.size,
+      mod: res.modTime ? new Date(res.modTime) : entry.mod,
       sha256: res.sha256 ?? '',
       md5: res.md5 ?? ''
     };
@@ -754,18 +850,24 @@
   // ----------------------------------------------------------- share links
 
   async function openShare(entry: Entry): Promise<void> {
+    // A slow answer for a previous file must not fill this dialog: remember
+    // which request belongs to the entry currently shown and drop the rest.
+    const seq = ++shareSeq;
     shareEntry = entry;
     shareUrl = '';
     shareError = '';
     shareCopied = false;
+    shareLoading = false;
 
     if (!isWails) {
+      if (seq !== shareSeq) return;
       shareUrl = `https://drive.google.com/file/d/${encodeURIComponent(entry.path ?? entry.name)}/view?usp=sharing`;
       return;
     }
     if (!account) return;
     shareLoading = true;
     const res = (await backend.shareLink(account.id, entry.path ?? entry.id)) as ShareRes | null;
+    if (seq !== shareSeq || shareEntry !== entry) return;
     shareLoading = false;
     if (!res) {
       shareError = t('files.backendError');
@@ -823,6 +925,8 @@
 
   function openVerify(): void {
     if (!account) return;
+    verifySeq += 1;
+    verifyBusy = false;
     verifyOpen = true;
     verifyRoot = data.cloudPath;
     verifyResult = null;
@@ -831,6 +935,10 @@
 
   async function runVerify(): Promise<void> {
     if (!account || verifyBusy) return;
+    const seq = ++verifySeq;
+    const reqAccount = account.id;
+    const reqLocal = data.localPath;
+    const reqRoot = verifyRoot;
     verifyBusy = true;
     verifyError = '';
     verifyResult = null;
@@ -840,6 +948,7 @@
         same: data.localFiles.filter((e) => !e.dir).length,
         differ: 0,
         missing: 0,
+        errors: 0,
         examples: [],
         status: 'success'
       };
@@ -847,11 +956,19 @@
       return;
     }
 
-    const res = (await backend.verifyBackup(
-      account.id,
-      data.localPath,
-      verifyRoot
-    )) as CheckRes | null;
+    const res = (await backend.verifyBackup(reqAccount, reqLocal, reqRoot)) as CheckRes | null;
+    // Discard an answer for a superseded run or a retargeted/closed dialog, and
+    // leave the busy flag alone when a newer run owns it.
+    if (
+      seq !== verifySeq ||
+      !verifyOpen ||
+      account?.id !== reqAccount ||
+      data.localPath !== reqLocal ||
+      verifyRoot !== reqRoot
+    ) {
+      if (seq === verifySeq) verifyBusy = false;
+      return;
+    }
     verifyBusy = false;
     if (!res) {
       verifyError = t('files.backendError');
@@ -865,12 +982,75 @@
       same: res.same,
       differ: res.differ,
       missing: res.missing,
+      errors: res.errors ?? 0,
       examples: res.examples ?? [],
       status: res.status ?? ''
     };
   }
 
+  // rclone reports a check that hit unreadable/unhashable files as
+  // "N errors while checking" with no differ/missing entries. That is not a
+  // successful verification, so the counts alone must not decide the verdict.
+  function verifyErrorCount(r: { errors?: number; status?: string }): number {
+    if (r.errors && r.errors > 0) return r.errors;
+    const m = /(\d+)\s+errors?\b/i.exec(r.status ?? '');
+    return m ? Number(m[1]) : 0;
+  }
+
+  function verifyStatusOk(
+    status: string | undefined,
+    differ: number,
+    missing: number,
+    errors: number
+  ): boolean {
+    // The counts are authoritative. The backend deliberately keeps rclone's
+    // "N differences found" string for a reconciled split backup and zeroes
+    // the counts, so the status text alone must not decide the verdict.
+    if (errors > 0 || differ > 0 || missing > 0) return false;
+    const s = (status ?? '').trim().toLowerCase();
+    if (!s) return true;
+    if (s.includes('split uploads verified') || s.includes('split upload verified')) return true;
+    if (s.includes('could not') || s.includes('did not complete')) return false;
+    // Successful checks can carry descriptive statuses ("identical by size").
+    // Only explicit failure wording means the check did not complete.
+    return !(
+      /\d+\s+errors?\b/.test(s) ||
+      s.includes('error') ||
+      s.includes('differences found')
+    );
+  }
+
+  const verifyErrors = $derived(verifyResult ? verifyErrorCount(verifyResult) : 0);
+  const verifyStatusFailed = $derived(
+    !!verifyResult &&
+      !verifyStatusOk(
+        verifyResult.status,
+        verifyResult.differ,
+        verifyResult.missing,
+        verifyErrors
+      )
+  );
+  const verifySameCount = $derived.by(() => {
+    if (!verifyResult) return 0;
+    if (verifyResult.same > 0) return verifyResult.same;
+    // Older backends don't report the identical count. When nothing differs,
+    // fall back to the files currently in the compared local folder instead of
+    // showing "0 same", which looks like the whole backup changed.
+    if (
+      verifyResult.differ === 0 &&
+      verifyResult.missing === 0 &&
+      verifyErrors === 0 &&
+      !verifyStatusFailed
+    ) {
+      return data.localFiles.filter((e) => !e.dir).length;
+    }
+    return verifyResult.same;
+  });
+
   function pickVerifyFolder(path: string): void {
+    // Invalidate any check still running against the previous destination.
+    verifySeq += 1;
+    verifyBusy = false;
     verifyRoot = path;
     verifyResult = null;
     verifyError = '';
@@ -880,15 +1060,19 @@
 
   async function runSearchAll(): Promise<void> {
     if (!account || !q.trim()) return;
+    // A slow answer for an earlier query must not overwrite the newer results.
+    const seq = ++searchSeq;
+    const query = q.trim();
+    const accountID = account.id;
     searchOpen = true;
-    searchQuery = q.trim();
+    searchQuery = query;
     searchLoading = true;
     searchError = '';
     searchHits = [];
     searchTruncated = false;
 
     if (!isWails) {
-      const needle = searchQuery.toLowerCase();
+      const needle = query.toLowerCase();
       searchHits = data.cloudFiles
         .filter((e) => e.name.toLowerCase().includes(needle))
         .map((e) => ({
@@ -901,7 +1085,8 @@
       return;
     }
 
-    const res = (await backend.searchCloud(account.id, searchQuery)) as SearchRes | null;
+    const res = (await backend.searchCloud(accountID, query)) as SearchRes | null;
+    if (seq !== searchSeq || searchQuery !== query || account?.id !== accountID) return;
     searchLoading = false;
     if (!res) {
       searchError = t('files.backendError');
@@ -1467,13 +1652,13 @@
           <div class="dest-pick">
             <div class="sl">
               <div class="st">{t('files.otherFolder')}</div>
-              <div class="sd truncate">{destFolder || t('files.noFolderChosen')}</div>
+              <div class="sd truncate">{destFolder ?? t('files.noFolderChosen')}</div>
             </div>
             <button class="btn tonal sm" onclick={pickLocalFolder}>
               <Icon name="folder-open" size={16} />{t('files.chooseFolder')}
             </button>
           </div>
-          {#if destFolder}
+          {#if destFolder !== null}
             <div class="dialog-note" style="margin-top:8px">
               {t('files.sourceFolder')}: {data.localPath || '—'}
             </div>
@@ -1483,16 +1668,6 @@
             {destOpen.mode === 'move' ? t('files.moveBody') : t('files.copyBody')}
           </p>
           <div class="dest-options">
-            {#if destOpen.mode === 'move'}
-              <label class="dest-choice" class:selected={destChoice === 'current'}>
-                <input type="radio" name="dest-choice" value="current"
-                  checked={destChoice === 'current'} onchange={() => selectDestChoice('current')} />
-                <span class="dc-body">
-                  <span class="dc-title">{t('files.currentFolder')}</span>
-                  <span class="dc-sub truncate">{data.cloudPath || t('files.cloudRoot')}</span>
-                </span>
-              </label>
-            {/if}
             <label class="dest-choice" class:selected={destChoice === 'account'}
               class:disabled={destOtherAccounts.length === 0}>
               <input type="radio" name="dest-choice" value="account"
@@ -1508,7 +1683,9 @@
               <span class="dc-body">
                 <span class="dc-title">{t('files.otherFolder')}</span>
                 <span class="dc-sub truncate">
-                  {destChoice === 'folder' && destFolder ? destFolder : t('files.noFolderChosen')}
+                  {destChoice === 'folder' && destFolder !== null
+                    ? (destFolder || t('files.cloudRoot'))
+                    : t('files.noFolderChosen')}
                 </span>
               </span>
             </label>
@@ -1527,7 +1704,9 @@
             <div class="dest-pick">
               <div class="sl">
                 <div class="st">{t('files.otherFolder')}</div>
-                <div class="sd truncate">{destFolder || t('files.cloudRoot')}</div>
+                <div class="sd truncate">
+                  {destFolder !== null ? (destFolder || t('files.cloudRoot')) : t('files.noFolderChosen')}
+                </div>
               </div>
               <button class="btn tonal sm" onclick={() => (pickerFor = 'dest')}>
                 <Icon name="folder-open" size={16} />{t('files.chooseFolder')}
@@ -1559,7 +1738,7 @@
 {/if}
 
 {#if pickerFor === 'dest' && account && destOpen}
-  <CloudFolderPicker accountID={destResolvedAccount || account.id} initial={destFolder}
+  <CloudFolderPicker accountID={destResolvedAccount || account.id} initial={destFolder ?? ''}
     onpick={pickDestFolder} onclose={() => (pickerFor = null)} />
 {/if}
 
@@ -1592,6 +1771,8 @@
           </div>
           {#if detailEntry.dir}
             <div class="field-hint neutral" style="margin-top:12px">{t('files.dirNoHash')}</div>
+          {:else if !detailData.sha256 && !detailData.md5}
+            <div class="field-hint neutral" style="margin-top:12px">{t('files.hashUnavailable')}</div>
           {:else}
             <div class="hash-row">
               <span class="hash-label">SHA-256</span>
@@ -1716,14 +1897,14 @@
             <div class="st">{t('files.destFolder')}</div>
             <div class="sd truncate">{verifyRoot || t('files.cloudRoot')}</div>
           </div>
-          <button class="btn tonal sm" onclick={() => (pickerFor = 'verify')}>
+          <button class="btn tonal sm" disabled={verifyBusy} onclick={() => (pickerFor = 'verify')}>
             <Icon name="folder-open" size={16} />{t('files.chooseFolder')}
           </button>
         </div>
 
         {#if verifyResult}
           <div class="verify-counts">
-            <div class="vc"><b class="nums">{verifyResult.same}</b><span>{t('files.same')}</span></div>
+            <div class="vc"><b class="nums">{verifySameCount}</b><span>{t('files.same')}</span></div>
             <div class="vc differ"><b class="nums">{verifyResult.differ}</b><span>{t('files.differ')}</span></div>
             <div class="vc missing"><b class="nums">{verifyResult.missing}</b><span>{t('files.missing')}</span></div>
           </div>
@@ -1736,9 +1917,15 @@
             </div>
           {/if}
           <p class="dialog-note" style="margin-top:12px">
-            {verifyResult.differ || verifyResult.missing
-              ? t('files.verifyDifferBody')
-              : t('files.verifySameBody')}
+            {#if verifyErrors > 0}
+              {t('files.verifyErrorBody', { n: verifyErrors })}
+            {:else if verifyResult.differ || verifyResult.missing}
+              {t('files.verifyDifferBody')}
+            {:else if verifyStatusFailed}
+              {t('files.verifyIncompleteBody', { status: verifyResult.status || '—' })}
+            {:else}
+              {t('files.verifySameBody')}
+            {/if}
           </p>
         {:else if verifyError}
           <div class="banner" style="margin-top: 12px">

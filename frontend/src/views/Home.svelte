@@ -4,21 +4,59 @@
   import ProviderIcon from '$lib/components/ProviderIcon.svelte';
   import { app } from '$lib/state.svelte';
   import { t, fmtBytes, fmtTime } from '$lib/i18n';
-  import { accountName } from '$lib/mock';
-  import { data, refreshUsage, refreshJobs, resumePending, dismissPending } from '$lib/data.svelte';
+  import { accountName, type HistoryItem } from '$lib/mock';
+  import { data, refreshUsage, refreshJobs, refreshHistory, resumePending, dismissPending } from '$lib/data.svelte';
   import { backend, isWails } from '$lib/backend';
+
+  let resuming = $state(false);
+  let dismissing = $state(false);
+  let retrying = $state<string[]>([]);
+  // Both banner buttons act on the same pending entry, so neither may run while
+  // the other is awaiting the backend (a dismiss during a resume would settle
+  // the entry the resume is starting, and vice versa).
+  const bannerBusy = $derived(resuming || dismissing);
+
+  // A double-click can land after the first entry settled and the banner has
+  // advanced to the next one. Hold both buttons inert for the double-click
+  // window so the second click cannot act on a backup the user never saw.
+  function settleBanner(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 400));
+  }
+
+  async function dismissFirst(): Promise<void> {
+    const first = data.pendingResume[0];
+    if (!first || bannerBusy) return;
+    dismissing = true;
+    try {
+      await dismissPending(first.id);
+    } finally {
+      await settleBanner();
+      dismissing = false;
+    }
+  }
 
   async function continuePending(): Promise<void> {
     const first = data.pendingResume[0];
-    if (!first) return;
-    if (await resumePending(first.id)) {
-      app.go('activity');
-    } else {
-      app.notify(t('home.resume.failed'));
+    if (!first || bannerBusy) return;
+    resuming = true;
+    try {
+      if (await resumePending(first.id)) {
+        app.go('activity');
+      } else {
+        app.notify(t('home.resume.failed'));
+      }
+    } finally {
+      await settleBanner();
+      resuming = false;
     }
   }
 
   onMount(() => {
+    // Returning Home must reflect runs which settled elsewhere (Retry is hidden
+    // only while data.jobs holds the id as live, and the row state comes from
+    // History).
+    refreshJobs();
+    refreshHistory();
     // Quota is nice-to-have; never let it contend with a file listing.
     const timer = setTimeout(() => {
       if (!data.cloudLoading) refreshUsage();
@@ -29,19 +67,53 @@
   const n = $derived(data.accounts.length);
 
   // rclone skips files that already arrived, so retrying a failed backup only
-  // transfers the remainder.
+  // transfers the remainder. Interrupted runs are retryable too: a journal
+  // request is restarted from its stored spec, an in-memory job by id.
   async function retry(id: string): Promise<void> {
-    if (!isWails) {
-      app.go('wizard/1');
-      return;
+    // A double-click would reach ResumeJob twice; its duplicate-start guard
+    // then reads as a failure toast while the first retry is actually running.
+    // Track every row id, so one row settling cannot re-enable another.
+    if (retrying.includes(id)) return;
+    retrying = [...retrying, id];
+    try {
+      if (!isWails) {
+        app.go('wizard/1');
+        return;
+      }
+      if (data.pendingResume.some((p) => p.id === id)) {
+        if (await resumePending(id)) {
+          await refreshJobs();
+          app.go('activity');
+        } else {
+          app.notify(t('home.resume.failed'));
+        }
+        return;
+      }
+      const res = await backend.resumeJob(id);
+      if (!res || res.err) {
+        app.notify(res?.err?.detail || res?.err?.message || t('activity.retryGone'));
+        return;
+      }
+      await refreshJobs();
+      await refreshHistory();
+      app.go('activity');
+    } finally {
+      retrying = retrying.filter((x) => x !== id);
     }
-    const res = await backend.resumeJob(id);
-    if (!res || res.err) {
-      app.notify(t('activity.retryGone'));
-      return;
-    }
-    await refreshJobs();
-    app.go('activity');
+  }
+
+  // A recent row must not offer Retry while its job is live again (a by-id
+  // retry keeps the id, so History still shows the old failed record).
+  function live(id: string): boolean {
+    return data.jobs.some((j) => j.id === id && (j.state === 'running' || j.state === 'paused'));
+  }
+
+  // Synthetic entries have no resumable job behind them: the scheduler writes
+  // "schedule-*" and recordRestartFailure writes "restart-*".
+  function retryable(h: HistoryItem): boolean {
+    if (h.id.startsWith('schedule-') || h.id.startsWith('restart-')) return false;
+    if (live(h.id)) return false;
+    return h.state === 'failed' || h.state === 'interrupted';
   }
 </script>
 
@@ -85,11 +157,11 @@
             {t('home.resume.sub', { name: data.pendingResume[0].title })}
           </div>
         </div>
-        <button class="btn text sm" onclick={() => dismissPending(data.pendingResume[0].id)}>
+        <button class="btn text sm" onclick={dismissFirst} disabled={bannerBusy}>
           {t('home.resume.dismiss')}
         </button>
-        <button class="btn filled sm" onclick={continuePending}>
-          <Icon name="play" size={16} /><span>{t('home.resume.action')}</span>
+        <button class="btn filled sm" onclick={continuePending} disabled={bannerBusy}>
+          <Icon name="play-arrow" size={16} /><span>{t('home.resume.action')}</span>
         </button>
       </div>
     {/if}
@@ -160,16 +232,24 @@
           {#each data.history.slice(0, 3) as h (h.id)}
             <div class="recent-row" role="button" tabindex="0" onclick={() => app.go('activity')}
               onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); app.go('activity'); } }}>
-              <span class="st-icon {h.state === 'failed' ? 'err' : 'ok'}">
-                <Icon name={h.state === 'failed' ? 'error' : 'check'} size={18} />
+              <span class="st-icon {h.state === 'failed' ? 'err' : h.state === 'interrupted' ? 'warn' : h.state === 'cancelled' ? 'cancel' : 'ok'}">
+                <Icon name={h.state === 'interrupted' ? 'warning' : h.state === 'failed' ? 'error' : h.state === 'cancelled' ? 'remove' : 'check'} size={18} />
               </span>
               <div class="rmain">
                 <div class="rt">
-                  {h.kind === 'restore'
-                    ? t('activity.restoreOf', { name: h.name ?? '' })
-                    : t(h.state === 'failed' ? 'home.recent.failed' : 'home.recent.done', {
-                        source: (app.lang === 'en' ? h.sourceEn : h.source) ?? ''
-                      })}
+                  {h.id.startsWith('restart-')
+                    ? t('activity.restartFailedTitle')
+                    : h.kind === 'restore'
+                      ? t('activity.restoreOf', { name: h.name ?? '' })
+                      : t(h.state === 'failed'
+                          ? 'home.recent.failed'
+                          : h.state === 'interrupted'
+                            ? 'home.recent.interrupted'
+                            : h.state === 'cancelled'
+                              ? 'home.recent.cancelled'
+                              : 'home.recent.done', {
+                          source: (app.lang === 'en' ? h.sourceEn : h.source) ?? ''
+                        })}
                 </div>
                 <div class="rs">
                   {fmtTime(h.time)} · {t('home.recent.files', {
@@ -177,9 +257,13 @@
                     size: fmtBytes(h.size)
                   })}
                 </div>
+                {#if (h.state === 'interrupted' || h.id.startsWith('restart-')) && h.error}
+                  <div class="rs">{h.error}</div>
+                {/if}
               </div>
-              {#if h.state === 'failed'}
-                <button class="btn text sm" onclick={(e) => { e.stopPropagation(); retry(h.id); }}>
+              {#if retryable(h)}
+                <button class="btn text sm" onclick={(e) => { e.stopPropagation(); retry(h.id); }}
+                  disabled={retrying.includes(h.id)}>
                   {t('common.retry')}
                 </button>
               {/if}

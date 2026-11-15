@@ -7,12 +7,18 @@
   import { app } from '$lib/state.svelte';
   import { t, fmtBytes, fmtDuration, fmtTime } from '$lib/i18n';
   import { accountName, type HistoryItem } from '$lib/mock';
-  import { data, refreshJobs, refreshHistory } from '$lib/data.svelte';
+  import { data, refreshJobs, refreshHistory, resumePending } from '$lib/data.svelte';
   import { backend, isWails } from '$lib/backend';
 
   let tab = $state<'active' | 'history'>('active');
   let timer: ReturnType<typeof setInterval> | undefined;
   let detail = $state<HistoryItem | null>(null);
+  // Rows whose Retry / card action is awaiting the backend. A double-click
+  // would reach ResumeJob twice; its duplicate-start guard then reads as a
+  // false failure. One entry per id: a second row resolving must not clear the
+  // guard (and re-enable the button) of a row still in flight.
+  let retrying = $state<string[]>([]);
+  let acting = $state<string[]>([]);
 
   const active = $derived(data.jobs.filter((j) => j.state === 'running' || j.state === 'paused'));
   const accountLabel = $derived(data.accounts[0] ? accountName(data.accounts[0], app.lang) : '');
@@ -29,44 +35,129 @@
     return t('activity.backupTitle', { source: name, account: accountLabel });
   }
 
+  // The scheduler records synthetic failed entries with no job behind them:
+  // "schedule-blocked-<unix>" when a paused backup holds the point, and
+  // "schedule-<unix>" when a scheduled start kept failing. Neither can be
+  // resumed, so show the explanation and let the user view it instead of
+  // retrying something that does not exist.
+  function isSyntheticSchedule(h: HistoryItem): boolean {
+    return h.id.startsWith('schedule-');
+  }
+
+  function isScheduleBlocked(h: HistoryItem): boolean {
+    return h.id.startsWith('schedule-blocked-');
+  }
+
+  // recordRestartFailure also writes a synthetic record, with no resumable job
+  // behind it, so it must get the same treatment as the schedule records.
+  function isRestartRecord(h: HistoryItem): boolean {
+    return h.id.startsWith('restart-');
+  }
+
+  function isSyntheticRecord(h: HistoryItem): boolean {
+    return isSyntheticSchedule(h) || isRestartRecord(h);
+  }
+
   async function pause(id: string): Promise<void> {
-    await backend.pauseJob(id);
-    await refreshJobs();
+    if (acting.includes(id)) return;
+    acting = [...acting, id];
+    try {
+      await backend.pauseJob(id);
+      await refreshJobs();
+    } finally {
+      acting = acting.filter((x) => x !== id);
+    }
   }
 
   async function resume(id: string): Promise<void> {
-    await backend.resumeJob(id);
-    await refreshJobs();
+    if (acting.includes(id)) return;
+    acting = [...acting, id];
+    try {
+      const res = await backend.resumeJob(id);
+      // ResumeJob refuses with a reason (still winding down, copy cannot be
+      // resumed, …); show it instead of silently leaving the card paused.
+      if (res?.err) {
+        app.notify(res.err.detail || res.err.message || t('activity.resumeFailed'));
+      }
+      await refreshJobs();
+    } finally {
+      acting = acting.filter((x) => x !== id);
+    }
   }
 
   async function cancel(id: string): Promise<void> {
-    await backend.cancelJob(id);
-    await refreshJobs();
-    refreshHistory();
+    if (acting.includes(id)) return;
+    acting = [...acting, id];
+    try {
+      await backend.cancelJob(id);
+      await refreshJobs();
+      refreshHistory();
+    } finally {
+      acting = acting.filter((x) => x !== id);
+    }
   }
 
   // Retry re-runs the stored job spec. rclone only sends what is missing, so a
-  // failed backup picks up where it stopped.
-  async function retry(rec: HistoryItem): Promise<void> {
-    if (!isWails) {
-      app.go('wizard/1');
-      return;
-    }
-    const res = await backend.resumeJob(rec.id);
-    if (!res || res.err) {
-      app.notify(t('activity.retryGone'));
-      return;
-    }
-    tab = 'active';
-    await refreshJobs();
-    app.notify(t('activity.retryStarted'));
+  // failed backup picks up where it stopped. An interrupted run is retryable
+  // too: one whose request survived in the journal is restarted from that
+  // stored request, while a job still in memory is resumed by id.
+  // A History row whose job is live again (for example a just-retried by-id
+  // resume) must not offer Retry: the backend would refuse with "still running"
+  // and show it as a false failure.
+  function live(id: string): boolean {
+    return data.jobs.some((j) => j.id === id && (j.state === 'running' || j.state === 'paused'));
   }
 
+  async function retry(rec: HistoryItem): Promise<void> {
+    if (retrying.includes(rec.id)) return;
+    retrying = [...retrying, rec.id];
+    try {
+      if (!isWails) {
+        app.go('wizard/1');
+        return;
+      }
+      if (data.pendingResume.some((p) => p.id === rec.id)) {
+        if (!(await resumePending(rec.id))) {
+          app.notify(t('activity.resumeFailed'));
+          return;
+        }
+        tab = 'active';
+        await refreshJobs();
+        app.notify(t('activity.retryStarted'));
+        return;
+      }
+      const res = await backend.resumeJob(rec.id);
+      if (!res || res.err) {
+        app.notify(res?.err?.detail || res?.err?.message || t('activity.retryGone'));
+        return;
+      }
+      tab = 'active';
+      await refreshJobs();
+      await refreshHistory();
+      app.notify(t('activity.retryStarted'));
+    } finally {
+      retrying = retrying.filter((x) => x !== rec.id);
+    }
+  }
+
+  // A job finishing leaves data.jobs, so poll History too: its failed row must
+  // stop offering Retry once the retried run has settled.
+  function jobSignature(): string {
+    return data.jobs.map((j) => `${j.id}:${j.state}`).join('|');
+  }
+  let jobSig = '';
   onMount(() => {
-    refreshJobs();
+    refreshJobs().then(() => {
+      jobSig = jobSignature();
+    });
     refreshHistory();
-    timer = setInterval(() => {
-      refreshJobs();
+    timer = setInterval(async () => {
+      await refreshJobs();
+      const sig = jobSignature();
+      if (sig !== jobSig) {
+        jobSig = sig;
+        refreshHistory();
+      }
     }, 1200);
   });
 
@@ -90,7 +181,7 @@
         {t('activity.tabActive')}<span class="count">{active.length}</span>
       </button>
       <button type="button" class="tab" role="tab" id="tab-history" aria-selected={tab === 'history'}
-        onclick={() => (tab = 'history')}>
+        onclick={() => { tab = 'history'; refreshHistory(); }}>
         {t('activity.tabHistory')}<span class="count">{data.history.length}</span>
       </button>
     </div>
@@ -140,15 +231,15 @@
                 {/if}
                 <div class="job-actions">
                   {#if j.state === 'running'}
-                    <button class="btn tonal sm" onclick={() => pause(j.id)}>
+                    <button class="btn tonal sm" onclick={() => pause(j.id)} disabled={acting.includes(j.id)}>
                       <Icon name="pause" size={16} /><span>{t('activity.pause')}</span>
                     </button>
                   {:else}
-                    <button class="btn tonal sm" onclick={() => resume(j.id)}>
+                    <button class="btn tonal sm" onclick={() => resume(j.id)} disabled={acting.includes(j.id)}>
                       <Icon name="play-arrow" size={16} /><span>{t('activity.resume')}</span>
                     </button>
                   {/if}
-                  <button class="btn text sm" onclick={() => cancel(j.id)}>{t('common.cancelAction')}</button>
+                  <button class="btn text sm" onclick={() => cancel(j.id)} disabled={acting.includes(j.id)}>{t('common.cancelAction')}</button>
                 </div>
               </div>
             </article>
@@ -166,25 +257,60 @@
         {:else}
           {#each data.history as h (h.id)}
             <div class="history-row">
-              <span class="hi" class:ok={h.state === 'done'} class:err={h.state === 'failed'} class:cancel={h.state === 'cancelled'}>
-                <Icon name={h.state === 'failed' ? 'error' : h.state === 'cancelled' ? 'remove' : 'check'} size={18} />
+              <span class="hi" class:ok={h.state === 'done'} class:err={h.state === 'failed'}
+                class:cancel={h.state === 'cancelled'} class:warn={h.state === 'interrupted'}>
+                <Icon name={h.state === 'interrupted'
+                  ? 'warning'
+                  : h.state === 'failed'
+                    ? 'error'
+                    : h.state === 'cancelled'
+                      ? 'remove'
+                      : 'check'} size={18} />
               </span>
               <div class="hm">
                 <div class="ht">
-                  {h.kind === 'restore'
-                    ? t('activity.restoreOf', { name: h.name ?? h.source ?? '' })
-                    : t('activity.backupTitle', { source: h.source ?? '', account: accountLabel })}
-                </div>
-                <div class="hs">
-                  {#if h.state === 'failed'}
-                    {h.failed ? t('activity.failedTitle', { n: h.failed }) : t('activity.failedGeneric')} · {fmtTime(h.time)}
+                  {#if isScheduleBlocked(h)}
+                    {t('activity.scheduleBlockedTitle')}
+                  {:else if isSyntheticSchedule(h)}
+                    {t('activity.scheduleFailedTitle')}
+                  {:else if isRestartRecord(h)}
+                    {t('activity.restartFailedTitle')}
+                  {:else if h.kind === 'restore'}
+                    {t('activity.restoreOf', { name: h.name ?? h.source ?? '' })}
                   {:else}
-                    {fmtTime(h.time)} · {fmtBytes(h.size)} · {t('files.count', { n: (h.files ?? 0).toLocaleString('en-US') })}
+                    {t('activity.backupTitle', { source: h.source ?? '', account: accountLabel })}
                   {/if}
                 </div>
+                {#if isSyntheticRecord(h)}
+                  <div class="hs">
+                    {isScheduleBlocked(h)
+                      ? t('activity.scheduleBlockedHint')
+                      : isRestartRecord(h)
+                        ? t('activity.restartFailedHint')
+                        : t('activity.scheduleFailedHint')}
+                  </div>
+                  {#if h.error}
+                    <div class="hs history-error">{h.error}</div>
+                  {/if}
+                {:else}
+                  <div class="hs">
+                    {#if h.state === 'interrupted'}
+                      {t('activity.interrupted')} · {fmtTime(h.time)}
+                    {:else if h.state === 'failed'}
+                      {h.failed ? t('activity.failedTitle', { n: h.failed }) : t('activity.failedGeneric')} · {fmtTime(h.time)}
+                    {:else if h.state === 'cancelled'}
+                      {t('activity.cancelled')} · {fmtTime(h.time)}
+                    {:else}
+                      {fmtTime(h.time)} · {fmtBytes(h.size)} · {t('files.count', { n: (h.files ?? 0).toLocaleString('en-US') })}
+                    {/if}
+                  </div>
+                  {#if h.state === 'interrupted' && h.error}
+                    <div class="hs history-error">{h.error}</div>
+                  {/if}
+                {/if}
               </div>
-              {#if h.state === 'failed'}
-                <button class="btn text sm" onclick={() => retry(h)}>{t('activity.retry')}</button>
+              {#if (h.state === 'failed' || h.state === 'interrupted') && !isSyntheticRecord(h) && !live(h.id)}
+                <button class="btn text sm" onclick={() => retry(h)} disabled={retrying.includes(h.id)}>{t('activity.retry')}</button>
               {:else}
                 <button class="btn text sm" onclick={() => (detail = h)}>{t('common.view')}</button>
               {/if}
@@ -201,7 +327,15 @@
     <div class="dialog" style="width: 520px">
       <div class="dialog-head" style="padding-bottom: 2px">
         <div class="grow">
-          <div class="dialog-title" id="hist-title">{detail.name || detail.source}</div>
+          <div class="dialog-title" id="hist-title">
+            {isScheduleBlocked(detail)
+              ? t('activity.scheduleBlockedTitle')
+              : isSyntheticSchedule(detail)
+                ? t('activity.scheduleFailedTitle')
+                : isRestartRecord(detail)
+                  ? t('activity.restartFailedTitle')
+                  : (detail.name || detail.source)}
+          </div>
         </div>
         <button class="icon-button" aria-label={t('common.close')} onclick={() => (detail = null)}>
           <Icon name="close" size={20} />
@@ -209,7 +343,7 @@
       </div>
       <div class="dialog-body">
         <div class="detail-list">
-          <div><span>{t('activity.detail.kind')}</span><b>{detail.kind === 'restore' ? t('activity.detail.restore') : t('activity.detail.backup')}</b></div>
+          <div><span>{t('activity.detail.kind')}</span><b>{isRestartRecord(detail) ? t('activity.detail.settings') : detail.kind === 'restore' ? t('activity.detail.restore') : t('activity.detail.backup')}</b></div>
           <div><span>{t('activity.detail.state')}</span><b>{t(`activity.detail.${detail.state}`)}</b></div>
           <div><span>{t('activity.detail.time')}</span><b>{fmtTime(detail.time)}</b></div>
           <div><span>{t('activity.detail.size')}</span><b>{fmtBytes(detail.size)}</b></div>
