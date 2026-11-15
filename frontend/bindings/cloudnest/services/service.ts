@@ -36,6 +36,18 @@ export function BeginConnect(provider: string, displayName: string): $Cancellabl
     });
 }
 
+/**
+ * BeginConnectWithClient signs in with the user's own OAuth app instead of
+ * rclone's shared one, which Google throttles and is retiring. The credentials
+ * are written to the remote together with the token, so the stored refresh
+ * token always belongs to the client_id stored beside it.
+ */
+export function BeginConnectWithClient(provider: string, displayName: string, clientID: string, clientSecret: string): $CancellablePromise<dto$0.ConnectSession> {
+    return $Call.ByID(321376548, provider, displayName, clientID, clientSecret).then(($result: any) => {
+        return $$createType3($result);
+    });
+}
+
 export function Bootstrap(): $CancellablePromise<dto$0.Bootstrap> {
     return $Call.ByID(394016632).then(($result: any) => {
         return $$createType4($result);
@@ -390,6 +402,18 @@ export function RestoreSplit(accountID: string, partsPath: string, destDir: stri
 export function ResumeJob(id: string): $CancellablePromise<dto$0.JobRef> {
     return $Call.ByID(4018894324, id).then(($result: any) => {
         return $$createType9($result);
+    });
+}
+
+/**
+ * RetryConnect restarts a failed sign-in with the same provider, remote name
+ * and OAuth client it was started with. Retrying through BeginConnect instead
+ * would generate a new remote name and drop a custom client, creating a second
+ * account on the shared app.
+ */
+export function RetryConnect(sessionID: string): $CancellablePromise<dto$0.ConnectSession> {
+    return $Call.ByID(785572358, sessionID).then(($result: any) => {
+        return $$createType3($result);
     });
 }
 

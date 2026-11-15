@@ -917,7 +917,28 @@ func (s *Service) ListProviders() dto.ProviderCatalog {
 }
 
 func (s *Service) BeginConnect(provider, displayName string) dto.ConnectSession {
-	if _, fail := s.client(); fail != nil {
+	return s.beginConnect(provider, displayName, nil)
+}
+
+// BeginConnectWithClient signs in with the user's own OAuth app instead of
+// rclone's shared one, which Google throttles and is retiring. The credentials
+// are written to the remote together with the token, so the stored refresh
+// token always belongs to the client_id stored beside it.
+func (s *Service) BeginConnectWithClient(provider, displayName, clientID, clientSecret string) dto.ConnectSession {
+	clientID = strings.TrimSpace(clientID)
+	clientSecret = strings.TrimSpace(clientSecret)
+	if err := validateOAuthClient(clientID, clientSecret); err != nil {
+		return dto.ConnectSession{Err: &dto.Fail{Code: string(apperr.ProviderUnsupported), Message: err.Error()}}
+	}
+	return s.beginConnect(provider, displayName, map[string]string{
+		"client_id":     clientID,
+		"client_secret": clientSecret,
+	})
+}
+
+func (s *Service) beginConnect(provider, displayName string, params map[string]string) dto.ConnectSession {
+	c, fail := s.client()
+	if fail != nil {
 		return dto.ConnectSession{Err: fail}
 	}
 	typ := rcloneType(provider)
@@ -929,21 +950,62 @@ func (s *Service) BeginConnect(provider, displayName string) dto.ConnectSession 
 	// A non-empty displayName comes from "sign in again" and must keep its
 	// exact name; uniquifying it would add a second remote instead of
 	// refreshing the existing one.
-	id, err := s.oauth.Begin(typ, name)
-	if err != nil {
-		switch {
-		case errors.Is(err, oauth.ErrBusy):
-			return dto.ConnectSession{Err: &dto.Fail{Code: string(apperr.OAuthBusy), Message: "another sign-in is running"}}
-		case errors.Is(err, oauth.ErrPortBusy):
+	//
+	// Signing in again must keep the OAuth app the remote already uses: a token
+	// minted by rclone's shared client_id cannot refresh against a remote which
+	// stores a custom one (and the other way round).
+	if params == nil && displayName != "" {
+		stored, storedErr := s.storedClientParams(c, name)
+		if storedErr != nil {
+			// Without knowing which OAuth app the remote uses, signing in would
+			// mint a token for a different one; ask the user to retry instead.
+			if s.log != nil {
+				s.log.Warn("service: read stored client failed", "account", name, "err", storedErr)
+			}
 			return dto.ConnectSession{Err: &dto.Fail{
-				Code:    string(apperr.OAuthPortBusy),
-				Message: "the sign-in port is busy",
-				Detail:  "Port 53682 is already in use, usually by an earlier sign-in that did not finish. Close any rclone windows and try again.",
+				Code:    string(apperr.Unknown),
+				Message: "could not read this account's settings",
+				Detail:  "The account's sign-in settings could not be read, so signing in again might break it. Please try again.",
+				Retry:   true,
 			}}
 		}
-		return dto.ConnectSession{Err: failFrom(err)}
+		params = stored
+	}
+	id, err := s.oauth.Begin(typ, name, params)
+	if err != nil {
+		return dto.ConnectSession{Err: connectError(err)}
 	}
 	return dto.ConnectSession{ID: id, Provider: provider, DisplayName: name}
+}
+
+// RetryConnect restarts a failed sign-in with the same provider, remote name
+// and OAuth client it was started with. Retrying through BeginConnect instead
+// would generate a new remote name and drop a custom client, creating a second
+// account on the shared app.
+func (s *Service) RetryConnect(sessionID string) dto.ConnectSession {
+	if _, fail := s.client(); fail != nil {
+		return dto.ConnectSession{Err: fail}
+	}
+	id, err := s.oauth.Retry(sessionID)
+	if err != nil {
+		return dto.ConnectSession{Err: connectError(err)}
+	}
+	return dto.ConnectSession{ID: id}
+}
+
+// connectError maps the sign-in start failures both begin paths share.
+func connectError(err error) *dto.Fail {
+	switch {
+	case errors.Is(err, oauth.ErrBusy):
+		return &dto.Fail{Code: string(apperr.OAuthBusy), Message: "another sign-in is running"}
+	case errors.Is(err, oauth.ErrPortBusy):
+		return &dto.Fail{
+			Code:    string(apperr.OAuthPortBusy),
+			Message: "the sign-in port is busy",
+			Detail:  "Port 53682 is already in use, usually by an earlier sign-in that did not finish. Close any rclone windows and try again.",
+		}
+	}
+	return failFrom(err)
 }
 
 func (s *Service) ConnectState(id string) dto.ConnectProgress {
@@ -971,13 +1033,61 @@ func (s *Service) RemoveAccount(id string) dto.Empty {
 	return dto.Empty{}
 }
 
-func (s *Service) persistToken(ctx context.Context, provider, name, token string) error {
+// storedClientParams returns the remote's own OAuth app credentials, so a
+// re-sign-in uses the same client which minted the refresh token. A remote
+// without a custom client_id uses rclone's shared one and returns nil, nil.
+// A read failure is returned: silently falling back to the shared client would
+// mint a token for a different app and, on the next update, overwrite the
+// remote's real credentials.
+func (s *Service) storedClientParams(c *rc.Client, name string) (map[string]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var out struct {
+		ClientID     string `json:"client_id"`
+		ClientSecret string `json:"client_secret"`
+	}
+	if err := c.Call(ctx, "config/get", map[string]any{"name": name}, &out); err != nil {
+		return nil, err
+	}
+	id := strings.TrimSpace(out.ClientID)
+	secret := strings.TrimSpace(out.ClientSecret)
+	if id == "" || secret == "" {
+		return nil, nil
+	}
+	return map[string]string{"client_id": id, "client_secret": secret}, nil
+}
+
+// validateOAuthClient rejects the obvious mistakes before the browser opens:
+// Google answers a malformed pair with an opaque invalid_client page while the
+// sign-in window sits waiting for a callback which will never come.
+func validateOAuthClient(clientID, clientSecret string) error {
+	switch {
+	case clientID == "" || clientSecret == "":
+		return errors.New("paste both the client ID and the client secret")
+	case len(clientID) > 512 || len(clientSecret) > 512:
+		return errors.New("the client ID or client secret is too long")
+	case strings.ContainsAny(clientID+clientSecret, " \t\r\n"):
+		return errors.New("the client ID or client secret contains a space")
+	case !strings.HasSuffix(clientID, ".apps.googleusercontent.com"):
+		return errors.New(`the client ID should end with ".apps.googleusercontent.com"`)
+	}
+	return nil
+}
+
+func (s *Service) persistToken(ctx context.Context, provider, name, token string, clientParams map[string]string) error {
 	c, err := s.eng.Client()
 	if err != nil {
 		return err
 	}
 
 	params := map[string]any{"token": token}
+	// Keep the OAuth app beside the token it minted; without this a re-sign-in
+	// later would refresh with a different client and fail.
+	for _, key := range []string{"client_id", "client_secret"} {
+		if v := strings.TrimSpace(clientParams[key]); v != "" {
+			params[key] = v
+		}
+	}
 	if provider == "onedrive" {
 		extra, driveErr := onedriveDriveParams(ctx, token)
 		if driveErr != nil {
@@ -992,14 +1102,22 @@ func (s *Service) persistToken(ctx context.Context, provider, name, token string
 	}
 
 	opt := &rc.ConfigOpt{NonInteractive: true}
-	if _, err := c.CreateRemote(ctx, rc.CreateRemoteIn{
-		Name:       name,
-		Type:       provider,
-		Parameters: params,
-		Opt:        opt,
-	}); err != nil {
-		// Re-authenticating an existing remote: update it in place.
-		if _, updateErr := c.UpdateRemote(ctx, name, params, opt); updateErr != nil {
+	// Update first, create only when the section does not exist. rclone 1.76
+	// answers config/create for an existing name with success and replaces the
+	// whole section with the parameters given, so the create-first order which
+	// used to be here silently dropped scope, root_folder_id and team_drive on
+	// every re-sign-in of an imported remote. config/update merges the keys it
+	// is given and leaves the rest alone (verified against rclone 1.76).
+	if _, updateErr := c.UpdateRemote(ctx, name, params, opt); updateErr != nil {
+		if !missingConfigSection(updateErr) {
+			return friendlyConfigError(updateErr)
+		}
+		if _, err := c.CreateRemote(ctx, rc.CreateRemoteIn{
+			Name:       name,
+			Type:       provider,
+			Parameters: params,
+			Opt:        opt,
+		}); err != nil {
 			return friendlyConfigError(err)
 		}
 	}
@@ -1031,6 +1149,17 @@ func friendlyConfigError(err error) error {
 		return fmt.Errorf("Microsoft did not report which drive to use — please sign in again: %w", err)
 	}
 	return err
+}
+
+// missingConfigSection reports whether a config/update failure means the remote
+// does not exist yet, in which case config/create is the right call. Any other
+// failure must not fall through to create: rclone 1.76 accepts config/create
+// for an existing name and replaces the whole section.
+func missingConfigSection(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "couldn't find type field in config") ||
+		strings.Contains(msg, "didn't find section") ||
+		strings.Contains(msg, "not found in config")
 }
 
 // ---------------------------------------------------------------- files

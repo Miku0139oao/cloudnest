@@ -44,8 +44,10 @@ type Progress struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// CreateRemoteFunc persists the token as a new remote.
-type CreateRemoteFunc func(ctx context.Context, provider, name, token string) error
+// CreateRemoteFunc persists the token as a new remote. params carries the
+// credentials the sign-in used (client_id/client_secret) which the remote must
+// keep, or it would later refresh a token minted for a different OAuth client.
+type CreateRemoteFunc func(ctx context.Context, provider, name, token string, params map[string]string) error
 
 type session struct {
 	id       string
@@ -55,6 +57,8 @@ type session struct {
 	url      string
 	message  string
 	err      string
+	// params are the OAuth app credentials passed to rclone authorize.
+	params map[string]string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -68,6 +72,9 @@ type Manager struct {
 	// logf receives plain state transitions so a failed sign-in can be
 	// diagnosed from cloudnest.log. It may be nil.
 	logf func(string, ...any)
+	// logMu guards logf separately: Begin holds mu for the whole setup and
+	// logs while holding it, so sharing mu here deadlocked every sign-in.
+	logMu sync.Mutex
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -93,23 +100,60 @@ func New(rclonePath string, create CreateRemoteFunc) *Manager {
 
 // SetLogf installs a logger for sign-in diagnostics. Call it before Begin.
 func (m *Manager) SetLogf(fn func(string, ...any)) {
-	m.mu.Lock()
+	m.logMu.Lock()
 	m.logf = fn
-	m.mu.Unlock()
+	m.logMu.Unlock()
 }
 
 func (m *Manager) log(format string, args ...any) {
-	m.mu.Lock()
+	m.logMu.Lock()
 	fn := m.logf
-	m.mu.Unlock()
+	m.logMu.Unlock()
 	if fn != nil {
 		fn(format, args...)
 	}
 }
 
+// authorizeClientArgs returns rclone's positional client_id/client_secret pair.
+// Both must be present or neither; a value which could be read as a flag or
+// split into extra arguments is rejected rather than passed to exec.
+func authorizeClientArgs(params map[string]string) (string, string, error) {
+	id := strings.TrimSpace(params["client_id"])
+	secret := strings.TrimSpace(params["client_secret"])
+	if id == "" && secret == "" {
+		return "", "", nil
+	}
+	if id == "" || secret == "" {
+		return "", "", errors.New("oauth: a custom client needs both a client_id and a client_secret")
+	}
+	for _, v := range []string{id, secret} {
+		if strings.HasPrefix(v, "-") || strings.ContainsAny(v, " \t\r\n") || len(v) > 512 {
+			return "", "", errors.New("oauth: the client_id or client_secret is not a valid value")
+		}
+	}
+	return id, secret, nil
+}
+
+func copyParams(params map[string]string) map[string]string {
+	if len(params) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(params))
+	for k, v := range params {
+		out[k] = v
+	}
+	return out
+}
+
 // Begin starts the flow. Only one flow may run at a time because rclone binds
-// a single fixed callback port (127.0.0.1:53682).
-func (m *Manager) Begin(provider, name string) (string, error) {
+// a single fixed callback port (127.0.0.1:53682). params, when it carries
+// client_id and client_secret, makes rclone authorize with the user's own OAuth
+// app instead of rclone's shared one.
+func (m *Manager) Begin(provider, name string, params map[string]string) (string, error) {
+	clientArg, secretArg, err := authorizeClientArgs(params)
+	if err != nil {
+		return "", err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.active != "" {
@@ -125,13 +169,21 @@ func (m *Manager) Begin(provider, name string) (string, error) {
 	if err := probeCallbackPort(); err != nil {
 		return "", ErrPortBusy
 	}
-	m.log("oauth: begin provider=%s name=%s", provider, name)
+	m.log("oauth: begin provider=%s name=%s custom_client=%v", provider, name, clientArg != "")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	s := &session{id: id, provider: provider, name: name, state: Preparing, ctx: ctx, cancel: cancel}
+	s := &session{id: id, provider: provider, name: name, state: Preparing, ctx: ctx, cancel: cancel, params: copyParams(params)}
 	m.sessions[id] = s
 	m.active = id
 
-	cmd := exec.CommandContext(ctx, m.rclonePath, "authorize", provider, "--auth-no-open-browser")
+	args := []string{"authorize", provider}
+	if clientArg != "" {
+		// rclone takes the pair as positional arguments. They are visible in the
+		// process list while the sign-in runs, which matches where the config
+		// already keeps them; nothing logs them.
+		args = append(args, clientArg, secretArg)
+	}
+	args = append(args, "--auth-no-open-browser")
+	cmd := exec.CommandContext(ctx, m.rclonePath, args...)
 	addHiddenWindow(cmd)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -221,7 +273,7 @@ func (m *Manager) run(s *session, stdout io.ReadCloser, stderr io.ReadCloser) {
 	}
 
 	// Persist the token. This is a short synchronous call.
-	if err := m.create(s.ctx, s.provider, s.name, token); err != nil {
+	if err := m.create(s.ctx, s.provider, s.name, token, s.params); err != nil {
 		m.mu.Lock()
 		s.state = Failed
 		s.err = err.Error()
@@ -255,6 +307,22 @@ func (m *Manager) Poll(id string) Progress {
 		return Progress{State: Failed, Error: "sign-in session not found"}
 	}
 	return Progress{State: s.state, URL: s.url, Message: s.message, Error: s.err}
+}
+
+// Retry restarts the request behind a finished session with the same provider,
+// remote name and OAuth client. A retry must not fall back to the defaults:
+// the name may be an existing remote, and the client may be the user's own.
+func (m *Manager) Retry(id string) (string, error) {
+	m.mu.Lock()
+	s := m.sessions[id]
+	if s == nil {
+		m.mu.Unlock()
+		return "", errors.New("oauth: sign-in session not found")
+	}
+	provider, name := s.provider, s.name
+	params := copyParams(s.params)
+	m.mu.Unlock()
+	return m.Begin(provider, name, params)
 }
 
 func (m *Manager) Cancel(id string) {
