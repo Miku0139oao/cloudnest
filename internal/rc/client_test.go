@@ -100,6 +100,9 @@ func TestCallMapsJSONError(t *testing.T) {
 	if !IsNotFound(err) {
 		t.Fatalf("IsNotFound(%v) = false", err)
 	}
+	if !IsMethodMissing(err) {
+		t.Fatalf("IsMethodMissing(%v) = false", err)
+	}
 	var rcErr *Error
 	if !errors.As(err, &rcErr) {
 		t.Fatalf("not *Error: %T", err)

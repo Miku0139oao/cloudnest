@@ -68,3 +68,17 @@ func IsNotFound(err error) bool {
 	msg := strings.ToLower(e.Message)
 	return strings.Contains(msg, "not found") || strings.Contains(msg, "couldn't find method")
 }
+
+// IsMethodMissing reports whether err says the running rclone does not
+// implement the requested RC method. rclone answers an unknown method with a
+// 404 whose message is `couldn't find method "..."`, the same status it uses for
+// a missing object, so callers which treat 404 as "the file is absent" must
+// rule this out first.
+func IsMethodMissing(err error) bool {
+	var e *Error
+	if !errors.As(err, &e) {
+		return false
+	}
+	msg := strings.ToLower(e.Message)
+	return strings.Contains(msg, "couldn't find method") || strings.Contains(msg, "didn't find method")
+}
