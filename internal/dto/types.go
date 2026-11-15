@@ -51,6 +51,11 @@ type Account struct {
 	Used       int64  `json:"used"`
 	Total      int64  `json:"total"`
 	LastBackup int64  `json:"lastBackup,omitempty"`
+	// SharedClientID marks a Google Drive remote which has no client_id of its
+	// own. rclone's shared one is being retired and is heavily throttled, which
+	// is why quota and listings can take tens of seconds; the UI points the
+	// user at creating their own.
+	SharedClientID bool `json:"sharedClientId,omitempty"`
 }
 
 type AccountList struct {

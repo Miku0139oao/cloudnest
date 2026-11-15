@@ -19,6 +19,14 @@ export class Account {
     "total": number;
     "lastBackup"?: number;
 
+    /**
+     * SharedClientID marks a Google Drive remote which has no client_id of its
+     * own. rclone's shared one is being retired and is heavily throttled, which
+     * is why quota and listings can take tens of seconds; the UI points the
+     * user at creating their own.
+     */
+    "sharedClientId"?: boolean;
+
     /** Creates a new Account instance. */
     constructor($$source: Partial<Account> = {}) {
         if (!("id" in $$source)) {

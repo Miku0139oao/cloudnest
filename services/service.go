@@ -5,6 +5,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -106,6 +107,22 @@ type usageEntry struct {
 	at    time.Time
 }
 
+// usageFailure is a quota attempt which failed, kept for a short while so a
+// provider that is throttling is not asked again immediately.
+type usageFailure struct {
+	at  time.Time
+	err error
+}
+
+// usageRetryAfter is how long a failed quota read is remembered. The frontend
+// retries on its own, and each cold rclone attempt can take tens of seconds.
+const usageRetryAfter = 90 * time.Second
+
+// listBreakerWindow is how long listings skip the daemon after it timed out.
+// A fresh rclone process answers in about a second where the daemon's wedged
+// Drive pacer would take longer than the call timeout.
+const listBreakerWindow = 90 * time.Second
+
 type Service struct {
 	app      *application.App
 	eng      engine.Engine
@@ -121,6 +138,17 @@ type Service struct {
 	order   []string
 	records []dto.Record
 	usage   map[string]usageEntry
+	// usageFail remembers a recent quota failure per account so a slow provider
+	// is not asked again on every card render (see AccountUsage).
+	usageFail map[string]usageFailure
+	// usagePath is where the last measured quotas are persisted. A cold start
+	// shows those numbers instead of "unavailable" until a fresh read lands.
+	usagePath string
+	usageMu   sync.Mutex
+	// listFailAt remembers when the rclone daemon last timed out listing an
+	// account. Its Drive pacer can wedge while a fresh process still answers,
+	// so listings go straight to the CLI fallback for a while.
+	listFailAt map[string]time.Time
 
 	// journalEntries keeps the persisted history with enough detail to resume
 	// an interrupted backup after a restart.
@@ -152,21 +180,25 @@ type Service struct {
 func New(app *application.App, eng engine.Engine, store *settings.Store, rclonePath string, logger *slog.Logger) *Service {
 	dataDir, _ := platform.DataDir()
 	s := &Service{
-		app:      app,
-		eng:      eng,
-		store:    store,
-		rclone:   rclonePath,
-		log:      logger,
-		dataDir:  dataDir,
-		portable: dataDir != "",
-		jobs:     make(map[string]*jobState),
-		usage:    make(map[string]usageEntry),
+		app:        app,
+		eng:        eng,
+		store:      store,
+		rclone:     rclonePath,
+		log:        logger,
+		dataDir:    dataDir,
+		portable:   dataDir != "",
+		jobs:       make(map[string]*jobState),
+		usage:      make(map[string]usageEntry),
+		usageFail:  make(map[string]usageFailure),
+		listFailAt: make(map[string]time.Time),
 	}
 	s.oauth = oauth.New(rclonePath, s.persistToken)
 	if logger != nil {
 		s.oauth.SetLogf(func(format string, args ...any) { logger.Info(fmt.Sprintf(format, args...)) })
 	}
 	s.journalPath = journalPathFor(dataDir)
+	s.usagePath = usagePathFor(dataDir)
+	s.loadUsage()
 	s.loadJournal()
 	// The engine's supervisor relaunches rclone after an unexpected exit
 	// without going through RestartEngine. Reconcile there too, otherwise an
@@ -602,10 +634,17 @@ func (s *Service) ListAccounts() dto.AccountList {
 	out := make([]dto.Account, len(remotes))
 	for i, r := range remotes {
 		typeCtx, typeCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		provider := s.remoteProvider(typeCtx, c, r.Name)
+		provider, sharedClientID := s.remoteConfig(typeCtx, c, r.Name)
 		typeCancel()
-		out[i] = dto.Account{ID: r.Name, Provider: provider, Name: r.Name, Status: "connected"}
-		if used, total, ok := s.cachedUsage(r.Name); ok {
+		out[i] = dto.Account{
+			ID: r.Name, Provider: provider, Name: r.Name, Status: "connected",
+			SharedClientID: sharedClientID,
+		}
+		// Show the last measured quota immediately: the fresh read is done per
+		// card by AccountUsage and can take tens of seconds on a throttled
+		// Drive. Without a persisted value the cards said "unavailable" on
+		// every cold start even though a quota had been measured before.
+		if used, total, ok := s.staleUsage(r.Name); ok {
 			out[i].Used, out[i].Total = used, total
 		}
 		s.mu.Lock()
@@ -632,25 +671,32 @@ func (s *Service) AccountUsage(id string) dto.Usage {
 		return dto.Usage{Used: used, Total: total, Free: total - used}
 	}
 
+	// A provider that just failed must not be asked again straight away:
+	// operations/about on a throttled Drive takes tens of seconds, and the
+	// frontend (plus its own retry) would otherwise queue several of them.
+	if fail, ok := s.recentUsageFailure(id); ok {
+		if used, total, ok := s.staleUsage(id); ok {
+			return dto.Usage{Used: used, Total: total, Free: total - used}
+		}
+		return dto.Usage{Err: failFrom(fail.err)}
+	}
+
 	// Quota is decorative: a slow or throttled provider must not turn into a
-	// permanent "unavailable" label, so try the daemon twice, then a fresh
+	// permanent "unavailable" label, so try the daemon once, then a fresh
 	// rclone process, and finally fall back to whatever was measured before.
 	var lastErr error
 	if c, fail := s.client(); fail == nil {
-		for attempt := 0; attempt < 2; attempt++ {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			u, err := c.About(ctx, id+":")
-			cancel()
-			if err == nil && u.Total > 0 {
-				s.storeUsage(id, u.Used, u.Total, u.Free)
-				return dto.Usage{Used: u.Used, Total: u.Total, Free: u.Free}
-			}
-			if err != nil {
-				lastErr = err
-			} else {
-				lastErr = errors.New("cloud did not report a quota")
-			}
-			time.Sleep(500 * time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		u, err := c.About(ctx, id+":")
+		cancel()
+		if err == nil && u.Total > 0 {
+			s.storeUsage(id, u.Used, u.Total, u.Free)
+			return dto.Usage{Used: u.Used, Total: u.Total, Free: u.Free}
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = errors.New("cloud did not report a quota")
 		}
 	} else {
 		lastErr = errors.New(fail.Message)
@@ -663,10 +709,63 @@ func (s *Service) AccountUsage(id string) dto.Usage {
 		lastErr = err
 	}
 
+	if lastErr != nil {
+		s.noteUsageFailure(id, lastErr)
+	}
 	if used, total, ok := s.staleUsage(id); ok {
 		return dto.Usage{Used: used, Total: total, Free: total - used}
 	}
 	return dto.Usage{Err: failFrom(lastErr)}
+}
+
+func (s *Service) recentUsageFailure(id string) (usageFailure, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f, ok := s.usageFail[id]
+	if !ok || time.Since(f.at) > usageRetryAfter {
+		return usageFailure{}, false
+	}
+	return f, true
+}
+
+func (s *Service) noteUsageFailure(id string, err error) {
+	s.mu.Lock()
+	if s.usageFail == nil {
+		s.usageFail = make(map[string]usageFailure)
+	}
+	s.usageFail[id] = usageFailure{at: time.Now(), err: err}
+	s.mu.Unlock()
+}
+
+// listBreakerOpen reports whether the daemon timed out listing this account
+// recently enough that listings should go straight to the CLI fallback.
+func (s *Service) listBreakerOpen(accountID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	at, ok := s.listFailAt[accountID]
+	if !ok {
+		return false
+	}
+	if time.Since(at) > listBreakerWindow {
+		delete(s.listFailAt, accountID)
+		return false
+	}
+	return true
+}
+
+func (s *Service) markListFailure(accountID string) {
+	s.mu.Lock()
+	if s.listFailAt == nil {
+		s.listFailAt = make(map[string]time.Time)
+	}
+	s.listFailAt[accountID] = time.Now()
+	s.mu.Unlock()
+}
+
+func (s *Service) clearListFailure(accountID string) {
+	s.mu.Lock()
+	delete(s.listFailAt, accountID)
+	s.mu.Unlock()
 }
 
 func (s *Service) cachedUsage(id string) (int64, int64, bool) {
@@ -692,8 +791,91 @@ func (s *Service) staleUsage(id string) (int64, int64, bool) {
 
 func (s *Service) storeUsage(id string, used, total, free int64) {
 	s.mu.Lock()
+	if s.usage == nil {
+		s.usage = make(map[string]usageEntry)
+	}
 	s.usage[id] = usageEntry{used: used, total: total, free: free, at: time.Now()}
+	delete(s.usageFail, id)
 	s.mu.Unlock()
+	s.saveUsage()
+}
+
+// usagePathFor mirrors journalPathFor: the file lives beside history.json, and
+// an ephemeral data dir simply means quotas are not persisted.
+func usagePathFor(dataDir string) string {
+	if dataDir == "" {
+		return ""
+	}
+	return filepath.Join(dataDir, "usage.json")
+}
+
+// loadUsage restores the last measured quotas so the account cards show real
+// numbers on a cold start, when Drive routinely takes longer than the call
+// timeout to report them.
+func (s *Service) loadUsage() {
+	if s.usagePath == "" {
+		return
+	}
+	b, err := os.ReadFile(s.usagePath)
+	if err != nil {
+		return
+	}
+	var raw map[string]struct {
+		Used  int64 `json:"used"`
+		Total int64 `json:"total"`
+		Free  int64 `json:"free"`
+		At    int64 `json:"at"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, u := range raw {
+		if u.Total <= 0 {
+			continue
+		}
+		s.usage[id] = usageEntry{used: u.Used, total: u.Total, free: u.Free, at: time.Unix(u.At, 0)}
+	}
+}
+
+// saveUsage writes every measured quota atomically. The write is serialised so
+// two accounts finishing at once cannot interleave into a corrupt file.
+func (s *Service) saveUsage() {
+	if s.usagePath == "" {
+		return
+	}
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+
+	s.mu.Lock()
+	raw := make(map[string]struct {
+		Used  int64 `json:"used"`
+		Total int64 `json:"total"`
+		Free  int64 `json:"free"`
+		At    int64 `json:"at"`
+	}, len(s.usage))
+	for id, u := range s.usage {
+		raw[id] = struct {
+			Used  int64 `json:"used"`
+			Total int64 `json:"total"`
+			Free  int64 `json:"free"`
+			At    int64 `json:"at"`
+		}{Used: u.used, Total: u.total, Free: u.free, At: u.at.Unix()}
+	}
+	s.mu.Unlock()
+
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return
+	}
+	tmp := s.usagePath + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return
+	}
+	if err := os.Rename(tmp, s.usagePath); err != nil && s.log != nil {
+		s.log.Warn("service: persist usage failed", "err", err)
+	}
 }
 
 func (s *Service) ListProviders() dto.ProviderCatalog {
@@ -916,8 +1098,29 @@ func (s *Service) ListCloud(accountID, path string) dto.Listing {
 	remote := strings.Trim(path, "/")
 	started := time.Now()
 	s.log.Info("service: list cloud start", "account", accountID, "path", remote)
-	entries, err := c.List(ctx, accountID+":", remote, rc.ListOpt{})
-	if err != nil {
+	var entries []rc.Entry
+	var err error
+	if s.listBreakerOpen(accountID) {
+		// The daemon timed out recently, which on Drive means its pacer is
+		// backing off; a fresh process resets that state and answers in about
+		// a second. Skipping the doomed daemon call removes an eight-second
+		// stall from every folder the user opens.
+		s.log.Info("service: rc list skipped after recent timeout", "account", accountID, "path", remote)
+	} else {
+		entries, err = c.List(ctx, accountID+":", remote, rc.ListOpt{})
+		if err != nil {
+			if rc.IsNotFound(err) {
+				// A missing folder is not a wedged pacer; the CLI would only
+				// confirm the same 404.
+				s.log.Info("service: cloud path not found", "account", accountID, "path", remote, "err", err)
+				return dto.Listing{Path: path, Err: failFrom(err)}
+			}
+			s.markListFailure(accountID)
+		} else {
+			s.clearListFailure(accountID)
+		}
+	}
+	if err != nil || s.listBreakerOpen(accountID) {
 		s.log.Warn("service: rc list failed, trying CLI", "account", accountID, "path", remote, "err", err)
 		if cliEntries, cliErr := s.listViaCLI(accountID, remote); cliErr == nil {
 			entries = cliEntries
@@ -925,6 +1128,9 @@ func (s *Service) ListCloud(accountID, path string) dto.Listing {
 			s.log.Info("service: cloud listed via CLI", "account", accountID, "path", remote, "entries", len(cliEntries), "took", time.Since(started).String())
 		} else {
 			s.log.Warn("service: CLI list failed", "err", cliErr)
+			if err == nil {
+				err = cliErr
+			}
 		}
 	}
 	if err != nil {
@@ -1250,6 +1456,14 @@ func (s *Service) ActiveJobs() dto.JobProgressList {
 		applied := false
 		if stats != nil {
 			j.Bytes = stats.Bytes
+			// rclone never reports a "total files" which is meaningful for a
+			// sync (only the transfers which have started), and Cloudnest used
+			// to record 0 for every upload/download. Transfers plus checks is
+			// the number of files the run has processed, which is what the
+			// history row shows; a plan-derived count is never reduced.
+			if files := int(stats.Transfers + stats.Checks); files > j.Files {
+				j.Files = files
+			}
 			// Split backups know their plan total up front. rclone's own
 			// totalBytes only counts transfers that have started, and the new
 			// split pipeline starts parts a few at a time, so letting it win
@@ -1679,14 +1893,23 @@ func (s *Service) client() (*rc.Client, *dto.Fail) {
 	return c, nil
 }
 
-func (s *Service) remoteProvider(ctx context.Context, c *rc.Client, name string) string {
-	var out map[string]any
-	if err := c.Call(ctx, "config/get", map[string]any{"name": name}, &out); err == nil {
-		if t, ok := out["type"].(string); ok {
-			return providerID(t)
-		}
+// remoteConfig reads a remote's provider id and reports whether a Google Drive
+// remote has no client_id of its own. rclone's shared Drive client_id is being
+// retired and is throttled hard, which is the usual cause of a listing or quota
+// read taking tens of seconds; the UI uses this to point the user at a fix.
+func (s *Service) remoteConfig(ctx context.Context, c *rc.Client, name string) (provider string, sharedClientID bool) {
+	// Decoding only these keys keeps the OAuth token, which config/get also
+	// returns, out of memory and out of any log line.
+	var out struct {
+		Type     string `json:"type"`
+		ClientID string `json:"client_id"`
 	}
-	return "webdav"
+	if err := c.Call(ctx, "config/get", map[string]any{"name": name}, &out); err != nil {
+		return "webdav", false
+	}
+	provider = providerID(out.Type)
+	sharedClientID = out.Type == "drive" && strings.TrimSpace(out.ClientID) == ""
+	return provider, sharedClientID
 }
 
 func (s *Service) uniqueRemoteName(base string) string {

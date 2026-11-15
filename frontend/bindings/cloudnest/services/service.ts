@@ -131,7 +131,10 @@ export function DeleteCloud(accountID: string, paths: string[]): $CancellablePro
 }
 
 /**
- * DismissResume drops an interrupted job the user does not want to resume.
+ * DismissResume drops a resumable job the user does not want to resume. It
+ * settles both the journal entry and the History record built from it: History
+ * is rendered from s.records, so only flipping the journal would leave a stale
+ * "interrupted"/"failed" row offering a Retry for an id with no job behind it.
  */
 export function DismissResume(id: string): $CancellablePromise<dto$0.Empty> {
     return $Call.ByID(3959763761, id).then(($result: any) => {
@@ -157,9 +160,9 @@ export function EngineStatus(): $CancellablePromise<dto$0.EngineStatus> {
 }
 
 /**
- * FileDetail returns metadata for one object plus the hashes the backend can
- * provide. An unsupported MD5 is normal (many object stores only keep one
- * checksum), so that failure is ignored.
+ * FileDetail returns metadata for one object plus any hashes the backend can
+ * provide. Hashes are best effort: a backend without a native hash leaves that
+ * field empty instead of failing the whole request.
  */
 export function FileDetail(accountID: string, path: string): $CancellablePromise<dto$0.FileDetail> {
     return $Call.ByID(300117813, accountID, path).then(($result: any) => {
@@ -312,7 +315,8 @@ export function PauseJob(id: string): $CancellablePromise<dto$0.Empty> {
 }
 
 /**
- * PendingResume lists interrupted jobs, newest first.
+ * PendingResume lists jobs which can still be restarted from a stored request,
+ * newest first.
  */
 export function PendingResume(): $CancellablePromise<dto$0.JournalEntry[]> {
     return $Call.ByID(2484941674).then(($result: any) => {
@@ -459,6 +463,11 @@ export function Upload(accountID: string, destPath: string, localPaths: string[]
  * VerifyBackup compares a local backup source with its remote copy. The mapping
  * mirrors the upload layout: a folder is stored under destRoot/<base>, a single
  * file directly in destRoot.
+ * 
+ * VerifyBackup has no request argument, so the excludes the backup applied are
+ * recovered from the matching job. Without them every intentionally excluded
+ * file would be reported missing on the destination and a complete backup would
+ * never verify.
  */
 export function VerifyBackup(accountID: string, localPath: string, destRoot: string): $CancellablePromise<dto$0.CheckResult> {
     return $Call.ByID(4162889273, accountID, localPath, destRoot).then(($result: any) => {
