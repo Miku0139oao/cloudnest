@@ -33,6 +33,7 @@ function mapAccount(a: {
   total: number;
   lastBackup?: number;
   email?: string;
+  sharedClientId?: boolean;
 }): Account {
   return {
     id: a.id,
@@ -43,7 +44,8 @@ function mapAccount(a: {
     used: a.used,
     total: a.total,
     lastBackup: a.lastBackup ? new Date(a.lastBackup * 1000) : null,
-    email: a.email ?? ''
+    email: a.email ?? '',
+    sharedClientId: !!a.sharedClientId
   };
 }
 

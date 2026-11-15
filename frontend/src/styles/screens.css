@@ -354,6 +354,11 @@ html[data-theme="dark"] .hero {
 .cloud-card .usage-line { display: flex; justify-content: space-between; font: var(--type-label-m); color: var(--m3c-on-surface-variant); }
 .cloud-card .bar { margin-top: 2px; }
 .cloud-card .cc-foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; font: var(--type-body-s); color: var(--m3c-on-surface-variant); }
+/* A throttled shared client_id is the usual reason Drive browsing drags, so the
+   hint sits on the card itself and links to the rclone setup guide. */
+.cloud-card .cc-hint { margin-top: 10px; display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 8px 10px; border: 0; border-radius: 10px; background: var(--m3c-surface-container-high); color: var(--m3c-on-surface-variant); font: var(--type-body-s); cursor: pointer; }
+.cloud-card .cc-hint .cc-hint-action { flex: none; color: var(--m3c-primary); font: var(--type-label-m); }
+.cloud-card .cc-hint:hover { background: var(--m3c-surface-container-highest); }
 
 /* Anchored account menu (native popover) */
 .account-menu {

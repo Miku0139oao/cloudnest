@@ -144,6 +144,9 @@ export const dict: Record<Lang, Record<string, string>> = {
     'clouds.connected': '已連接',
     'clouds.relogin': '需要重新登入',
     'clouds.quotaUnknown': '空間資訊無法取得',
+    'clouds.sharedClientId':
+      'Google Drive 共用用戶端 ID 正被限速，瀏覽與容量讀取可能很慢。設定自己的 client_id 可改善。',
+    'clouds.sharedClientIdAction': '了解做法',
     'clouds.used': '已用 {used}，共 {total}',
     'clouds.lastBackup': '上次備份：{time}',
     'clouds.neverBackedUp': '尚未備份',
@@ -574,6 +577,9 @@ export const dict: Record<Lang, Record<string, string>> = {
     'clouds.connected': 'Connected',
     'clouds.relogin': 'Sign in again',
     'clouds.quotaUnknown': 'Space unavailable',
+    'clouds.sharedClientId':
+      "Google Drive's shared client ID is being rate-limited, which can make browsing and quota reads slow. Setting your own client_id fixes it.",
+    'clouds.sharedClientIdAction': 'How to set it up',
     'clouds.used': '{used} of {total}',
     'clouds.lastBackup': 'Last backup: {time}',
     'clouds.neverBackedUp': 'No backup yet',

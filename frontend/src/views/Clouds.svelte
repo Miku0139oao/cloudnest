@@ -155,6 +155,17 @@
             <span class="nums">{a.total > 0 ? Math.round((a.used / a.total) * 100) + '%' : ''}</span>
           </div>
           <span class="bar"><i style={`width:${a.total > 0 ? Math.round((a.used / a.total) * 100) : 0}%`}></i></span>
+          {#if a.sharedClientId}
+            <button
+              type="button"
+              class="cc-hint"
+              onclick={() => backend.openExternal('https://rclone.org/drive/#making-your-own-client-id')}
+            >
+              <Icon name="warning" size={14} />
+              <span class="grow">{t('clouds.sharedClientId')}</span>
+              <span class="cc-hint-action">{t('clouds.sharedClientIdAction')}</span>
+            </button>
+          {/if}
           <div class="cc-foot">
             <span>{a.lastBackup ? t('clouds.lastBackup', { time: fmtTime(a.lastBackup) }) : t('clouds.neverBackedUp')}</span>
             <button class="btn text sm" onclick={() => { data.activeAccount = a.id; app.go('files'); }}>{t('clouds.browse')}</button>

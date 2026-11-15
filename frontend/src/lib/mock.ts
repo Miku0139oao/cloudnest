@@ -15,6 +15,8 @@ export interface Account {
   total: number;
   lastBackup?: Date | null;
   email: string;
+  /** Google Drive without its own client_id: rclone's shared one is throttled. */
+  sharedClientId?: boolean;
 }
 
 export interface Entry {
