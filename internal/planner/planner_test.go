@@ -119,6 +119,105 @@ func TestPlanMirrorDetectsDeletionsAndAliases(t *testing.T) {
 	}
 }
 
+// TestPlanMirrorSkipsExcludedRemoteFiles pins the rclone semantics the warning
+// depends on: sync without --delete-excluded leaves excluded destination files
+// alone, so they are not deletions even when absent locally.
+func TestPlanMirrorSkipsExcludedRemoteFiles(t *testing.T) {
+	req := testRequest(ModeMirror)
+	req.Excludes = []string{"*.tmp", "node_modules"}
+	remote := &fakeRemote{entries: []dto.Entry{
+		{Path: "keep.txt", Size: 1},                  // present locally
+		{Path: "old.tmp", Size: 2},                   // excluded: left in place
+		{Path: "node_modules/pkg/index.js", Size: 3}, // excluded subtree
+		{Path: "sub/keep.TMP", Size: 4},              // excluded, case-insensitive
+		{Path: "gone.txt", Size: 5},                  // real deletion
+	}}
+
+	res, err := Plan(context.Background(), req, fakeWalk(
+		LocalFile{Path: "keep.txt", Size: 1},
+	), remote)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if res.DeleteCount != 1 || res.DeleteBytes != 5 {
+		t.Fatalf("DeleteCount/DeleteBytes = %d/%d, want 1/5 (%+v)", res.DeleteCount, res.DeleteBytes, res.Deletions)
+	}
+	if len(res.Deletions) != 1 || res.Deletions[0].Path != "gone.txt" {
+		t.Fatalf("Deletions = %+v, want only gone.txt", res.Deletions)
+	}
+}
+
+// TestPlanExcludeAnchoredRules pins rclone's rule semantics: a leading slash
+// anchors a rule to the sync root, while an unanchored directory rule excludes
+// that directory's subtree. The plan and the filter sent to rclone must agree,
+// or a mirror warning can omit a deletion the sync performs.
+func TestPlanExcludeAnchoredRules(t *testing.T) {
+	req := testRequest(ModeAdditive)
+	req.Excludes = []string{"/root-only.txt", "node_modules"}
+
+	res, err := Plan(context.Background(), req, fakeWalk(
+		LocalFile{Path: "root-only.txt", Size: 1},                  // anchored: excluded
+		LocalFile{Path: "sub/root-only.txt", Size: 2},              // deeper: NOT excluded
+		LocalFile{Path: "node_modules/pkg/index.js", Size: 3},      // subtree: excluded
+		LocalFile{Path: "repo/node_modules/pkg/lib.node", Size: 5}, // nested subtree: excluded
+		LocalFile{Path: "repo/src/keep2.txt", Size: 7},
+		LocalFile{Path: "keep.txt", Size: 4},
+	), nil)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if res.Files != 3 || res.Bytes != 13 {
+		t.Fatalf("Files/Bytes = %d/%d, want 3/13", res.Files, res.Bytes)
+	}
+}
+
+// TestExcludedComponentBoundaries pins rclone's (^|/)rule matching: an
+// unanchored rule matches at any component boundary, including a nested
+// directory, while an anchored rule only matches from the sync root.
+func TestExcludedComponentBoundaries(t *testing.T) {
+	cases := []struct {
+		rel      string
+		patterns []string
+		want     bool
+	}{
+		{"node_modules/y.bin", []string{"node_modules"}, true},
+		{"sub/node_modules/x.bin", []string{"node_modules"}, true},
+		{"repo/node_modules/pkg/lib.node", []string{"node_modules"}, true},
+		{"sub/cache/x.bin", []string{"cache"}, true},
+		{"a.tmp/b.txt", []string{"*.tmp"}, true},
+		{"x.tmpdir/a.txt", []string{"*.tmp"}, false},
+		{"a/b/c.txt", []string{"b/c.txt"}, true},
+		{"a/xb/c.txt", []string{"b/c.txt"}, false},
+		{"root-only.txt", []string{"/root-only.txt"}, true},
+		{"sub/root-only.txt", []string{"/root-only.txt"}, false},
+		{"sub/deep/root-only.txt", []string{"/root-only.txt"}, false},
+	}
+	for _, tc := range cases {
+		if got := Excluded(tc.rel, tc.patterns); got != tc.want {
+			t.Errorf("Excluded(%q, %v) = %v, want %v", tc.rel, tc.patterns, got, tc.want)
+		}
+	}
+}
+
+func TestRcloneRulesAddsSubtreeCompanions(t *testing.T) {
+	got := RcloneRules([]string{"*.tmp", " node_modules ", "/root-only.txt", "/a/**", "./b\\c"})
+	want := []string{
+		"*.tmp", "*.tmp/**",
+		"node_modules", "node_modules/**",
+		"/root-only.txt", "/root-only.txt/**",
+		"/a/**",
+		"b/c", "b/c/**",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("RcloneRules = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("RcloneRules[%d] = %q, want %q (all: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
 func TestPlanExcludeGlobs(t *testing.T) {
 	req := testRequest(ModeAdditive)
 	req.Excludes = []string{"*.TMP", "node_modules", "/root-only.txt"}

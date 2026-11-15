@@ -170,7 +170,7 @@ func Plan(ctx context.Context, req Request, walk LocalWalkFunc, remote RemoteLis
 			return Result{}, fmt.Errorf("planner: list remote: %w", err)
 		}
 		res.Deletions, res.DeleteCount, res.DeleteBytes, res.Estimated, res.Warnings, err =
-			collectDeletions(ctx, entries, local, maxEntries)
+			collectDeletions(ctx, entries, local, patterns, maxEntries)
 		if err != nil {
 			return Result{}, err
 		}
@@ -307,7 +307,7 @@ func WalkLocal(ctx context.Context, root string, fn func(LocalFile) error) error
 	})
 }
 
-func collectDeletions(ctx context.Context, entries []dto.Entry, local map[string]struct{}, maxEntries int) (
+func collectDeletions(ctx context.Context, entries []dto.Entry, local map[string]struct{}, patterns []string, maxEntries int) (
 	deletions []dto.DeletedItem, count int, bytes int64, estimated bool, warnings []string, err error,
 ) {
 	sliceCap := maxEntries
@@ -335,6 +335,13 @@ func collectDeletions(ctx context.Context, entries []dto.Entry, local map[string
 		}
 		key := strings.ToLower(rel)
 		if _, ok := local[key]; ok {
+			continue
+		}
+		// rclone's sync leaves destination files matched by --exclude alone
+		// (there is no --delete-excluded here), so they are not deletions. The
+		// local side already skips them from the upload count for the same
+		// reason; counting them here would overstate the warning.
+		if isExcluded(rel, patterns) {
 			continue
 		}
 		// Remote aliases (case or leading-slash differences) are the same
@@ -400,11 +407,45 @@ func normalizeExcludes(patterns []string) []string {
 		for strings.HasPrefix(p, "./") {
 			p = p[2:]
 		}
+		// A leading slash anchors the rule to the sync root in rclone, so it
+		// has to survive normalisation: isExcluded and RcloneRules both use it.
+		anchored := strings.HasPrefix(p, "/")
 		p = strings.Trim(p, "/")
 		if p == "" {
 			continue
 		}
+		if anchored {
+			p = "/" + p
+		}
 		out = append(out, strings.ToLower(p))
+	}
+	return out
+}
+
+// RcloneRules expands exclude patterns into the rules handed to rclone.
+// rclone matches a bare rule against a leaf name only, while the planner and
+// the wizard treat a matching directory as excluding its whole subtree, so
+// each rule gets a "/**" companion. A leading "/" stays as rclone's root
+// anchor.
+func RcloneRules(patterns []string) []string {
+	norm := normalizeExcludes(patterns)
+	out := make([]string, 0, len(norm)*2)
+	seen := make(map[string]struct{}, len(norm)*2)
+	add := func(rule string) {
+		if rule == "" {
+			return
+		}
+		if _, ok := seen[rule]; ok {
+			return
+		}
+		seen[rule] = struct{}{}
+		out = append(out, rule)
+	}
+	for _, p := range norm {
+		add(p)
+		if !strings.HasSuffix(p, "/**") {
+			add(strings.TrimSuffix(p, "/") + "/**")
+		}
 	}
 	return out
 }
@@ -416,15 +457,38 @@ func Excluded(rel string, patterns []string) bool {
 	return isExcluded(normalizeRel(rel), normalizeExcludes(patterns))
 }
 
-// isExcluded applies simple, case-insensitive globs to the full relative path,
-// its base name and every ancestor directory. Testing ancestors gives
-// directory excludes subtree semantics (for example "node_modules").
+// matchesRule reports whether rule matches p. An unanchored rule matches at
+// any component boundary, like rclone's (^|/)rule regex: the whole path or any
+// suffix that starts after a slash. An anchored rule only matches the whole
+// (root-relative) path.
+func matchesRule(rule, p string, anchored bool) bool {
+	if matched, err := path.Match(rule, p); err == nil && matched {
+		return true
+	}
+	if anchored {
+		return false
+	}
+	for i := 0; i < len(p); i++ {
+		if p[i] != '/' || i+1 >= len(p) {
+			continue
+		}
+		if matched, err := path.Match(rule, p[i+1:]); err == nil && matched {
+			return true
+		}
+	}
+	return false
+}
+
+// isExcluded applies simple, case-insensitive globs to a relative path. An
+// unanchored rule matches the full path at any component boundary and every
+// ancestor directory (directory rules exclude their subtree). A leading "/"
+// anchors the rule to the sync root, exactly like rclone, so it never matches
+// a bare base name deeper in the tree.
 func isExcluded(rel string, patterns []string) bool {
 	if len(patterns) == 0 {
 		return false
 	}
 	lower := strings.ToLower(rel)
-	base := path.Base(lower)
 
 	var prefixes []string
 	for i := 0; i < len(lower); i++ {
@@ -434,14 +498,14 @@ func isExcluded(rel string, patterns []string) bool {
 	}
 
 	for _, pat := range patterns {
-		if matched, err := path.Match(pat, lower); err == nil && matched {
-			return true
-		}
-		if matched, err := path.Match(pat, base); err == nil && matched {
+		anchored := strings.HasPrefix(pat, "/")
+		rule := strings.TrimPrefix(pat, "/")
+
+		if matchesRule(rule, lower, anchored) {
 			return true
 		}
 		for _, prefix := range prefixes {
-			if matched, err := path.Match(pat, prefix); err == nil && matched {
+			if matchesRule(rule, prefix, anchored) {
 				return true
 			}
 		}
