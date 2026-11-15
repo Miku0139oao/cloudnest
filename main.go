@@ -94,6 +94,10 @@ func main() {
 			UniqueID: instanceID,
 			OnSecondInstanceLaunch: func(data application.SecondInstanceData) {
 				if w, ok := app.Window.GetByName("main"); ok {
+					// The window may have been hidden to the tray, for which
+					// Restore does nothing, so un-hide it first (same sequence
+					// as the tray menu) and then bring it to the front.
+					w.Show()
 					w.Restore()
 					w.Focus()
 				}
