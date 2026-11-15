@@ -961,6 +961,23 @@ func readRemoteManifest(c *rc.Client, fs, parts string) (split.Manifest, string,
 		m, state := classifyManifest(raw)
 		return m, state, nil
 	}
+	// rclone 1.76 answers an unknown method with the same 404 it uses for a
+	// missing object, so the method-absent case must not be read as "no
+	// manifest". An object 404 is the normal "incomplete" signal.
+	if catErr != nil && !rc.IsMethodMissing(catErr) && rc.IsNotFound(catErr) {
+		return split.Manifest{}, "incomplete", nil
+	}
+
+	// Prove the manifest exists before copying it. rclone's copyfile on a
+	// missing Drive object retries until the call times out (tens of seconds)
+	// instead of answering 404, which used to make opening a not-yet-complete
+	// split look like a hung restore. operations/stat answers 404 immediately.
+	if _, statErr := statRemote(c, fs, remote); statErr != nil {
+		if rc.IsNotFound(statErr) {
+			return split.Manifest{}, "incomplete", nil
+		}
+		return split.Manifest{}, "", statErr
+	}
 
 	tmp, err := os.MkdirTemp("", "cloudnest-split-*")
 	if err != nil {
@@ -977,9 +994,8 @@ func readRemoteManifest(c *rc.Client, fs, parts string) (split.Manifest, string,
 	})
 	cpCancel()
 	if cpErr != nil {
-		// A missing manifest is the normal "incomplete" signal. Only the
-		// copyfile outcome is authoritative here: cat may be missing from
-		// this rclone build, and that must not mask a real copy failure.
+		// The stat above proved the manifest exists, so a 404 here means it was
+		// removed in between: still the normal "incomplete" signal.
 		if rc.IsNotFound(cpErr) {
 			return split.Manifest{}, "incomplete", nil
 		}

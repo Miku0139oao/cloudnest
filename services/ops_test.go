@@ -870,3 +870,114 @@ func TestDownloadStopsStartedJobsWhenALaterSourceFails(t *testing.T) {
 		t.Fatalf("job map has %d entries after a failed download, want 0", jobs)
 	}
 }
+
+// rcFail answers like rclone does for a failed call.
+func rcFail(w http.ResponseWriter, status int, msg string) {
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": msg, "status": status, "path": "test", "input": map[string]any{},
+	})
+}
+
+// TestReadRemoteManifestMissingIsIncomplete pins the fix for a hung restore:
+// rclone 1.76 has no operations/cat, and operations/copyfile on a missing Drive
+// object retries until the call times out. A missing manifest must be detected
+// from a single stat (404) instead of waiting out copyfile's 25s timeout.
+func TestReadRemoteManifestMissingIsIncomplete(t *testing.T) {
+	var copies, stats int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/operations/cat":
+			rcFail(w, http.StatusNotFound, `couldn't find method "operations/cat"`)
+		case "/operations/stat":
+			atomic.AddInt32(&stats, 1)
+			rcFail(w, http.StatusNotFound, "object not found")
+		case "/operations/copyfile":
+			atomic.AddInt32(&copies, 1)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := rc.New(srv.URL, "", "", nil)
+	_, state, err := readRemoteManifest(c, "gdrive:", "backup/file.parts")
+	if err != nil {
+		t.Fatalf("readRemoteManifest: %v", err)
+	}
+	if state != "incomplete" {
+		t.Fatalf("state = %q, want incomplete", state)
+	}
+	if got := atomic.LoadInt32(&stats); got != 1 {
+		t.Fatalf("stat calls = %d, want 1", got)
+	}
+	if got := atomic.LoadInt32(&copies); got != 0 {
+		t.Fatalf("copyfile calls = %d, want 0 (it would hang on a missing object)", got)
+	}
+}
+
+// TestReadRemoteManifestCat404IsIncomplete covers a build which does implement
+// operations/cat: the object 404 alone is authoritative, so no stat is needed.
+func TestReadRemoteManifestCat404IsIncomplete(t *testing.T) {
+	var stats int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/operations/cat":
+			rcFail(w, http.StatusNotFound, "object not found")
+		case "/operations/stat":
+			atomic.AddInt32(&stats, 1)
+			_, _ = w.Write([]byte(`{"item":{"Name":"m","Path":"m","Size":1}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := rc.New(srv.URL, "", "", nil)
+	_, state, err := readRemoteManifest(c, "gdrive:", "backup/file.parts")
+	if err != nil {
+		t.Fatalf("readRemoteManifest: %v", err)
+	}
+	if state != "incomplete" {
+		t.Fatalf("state = %q, want incomplete", state)
+	}
+	if got := atomic.LoadInt32(&stats); got != 0 {
+		t.Fatalf("stat calls = %d, want 0 (cat already answered)", got)
+	}
+}
+
+// TestReadRemoteManifestFallsBackToCopyFile keeps the existing behaviour for a
+// manifest which does exist: cat is unavailable, so copyfile fetches it.
+func TestReadRemoteManifestFallsBackToCopyFile(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/operations/cat":
+			rcFail(w, http.StatusNotFound, `couldn't find method "operations/cat"`)
+		case "/operations/stat":
+			_, _ = w.Write([]byte(`{"item":{"Name":"manifest.json","Path":"manifest.json","Size":17}}`))
+		case "/operations/copyfile":
+			var in struct {
+				DstFs     string `json:"dstFs"`
+				DstRemote string `json:"dstRemote"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&in)
+			if err := os.WriteFile(filepath.Join(in.DstFs, in.DstRemote), []byte(`{"format":"other/1"}`), 0o644); err != nil {
+				t.Errorf("write manifest: %v", err)
+			}
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := rc.New(srv.URL, "", "", nil)
+	_, state, err := readRemoteManifest(c, "gdrive:", "backup/file.parts")
+	if err != nil {
+		t.Fatalf("readRemoteManifest: %v", err)
+	}
+	if state != "foreign" {
+		t.Fatalf("state = %q, want foreign", state)
+	}
+}
