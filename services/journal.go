@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"cloudnest/internal/dto"
 )
@@ -75,6 +76,9 @@ func (s *Service) journalFinish(rec dto.Record) {
 			continue
 		}
 		s.journalEntries[i].State = rec.State
+		// A resumed job keeps its id but starts a new attempt; without updating
+		// StartedAt a reload would date the outcome from the first attempt.
+		s.journalEntries[i].StartedAt = rec.StartedAt
 		s.journalEntries[i].FinishedAt = rec.FinishedAt
 		s.journalEntries[i].Bytes = rec.Bytes
 		s.journalEntries[i].Files = rec.Files
@@ -89,26 +93,59 @@ func (s *Service) journalFinish(rec dto.Record) {
 	}
 }
 
-// PendingResume lists interrupted jobs, newest first.
+// PendingResume lists jobs which can still be restarted from a stored request,
+// newest first.
 func (s *Service) PendingResume() []dto.JournalEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]dto.JournalEntry, 0, 2)
 	for _, e := range s.journalEntries {
-		// Only jobs with a stored request can actually be restarted.
-		if e.State == "interrupted" && len(e.Request.SourcePaths) > 0 {
+		// Only jobs with a stored request can actually be restarted, and the
+		// scheduler's synthetic "schedule-*" records carry a request but have no
+		// transfer behind them, so they must never appear in the resume banner.
+		if len(e.Request.SourcePaths) == 0 {
+			continue
+		}
+		if strings.HasPrefix(e.ID, "schedule-") || strings.HasPrefix(e.ID, "restart-") {
+			continue
+		}
+		switch e.State {
+		case "interrupted":
 			out = append(out, e)
+		case "failed":
+			// A failed run loaded from the journal has no jobState to resume by
+			// id; offer its stored request instead. An in-memory job keeps the
+			// ResumeJob path, which reuses its id and history record.
+			if _, live := s.jobs[e.ID]; !live {
+				out = append(out, e)
+			}
 		}
 	}
 	return out
 }
 
-// DismissResume drops an interrupted job the user does not want to resume.
+// DismissResume drops a resumable job the user does not want to resume. It
+// settles both the journal entry and the History record built from it: History
+// is rendered from s.records, so only flipping the journal would leave a stale
+// "interrupted"/"failed" row offering a Retry for an id with no job behind it.
 func (s *Service) DismissResume(id string) dto.Empty {
 	s.mu.Lock()
 	for i := range s.journalEntries {
-		if s.journalEntries[i].ID == id && s.journalEntries[i].State == "interrupted" {
+		if s.journalEntries[i].ID != id {
+			continue
+		}
+		switch s.journalEntries[i].State {
+		case "interrupted", "failed":
 			s.journalEntries[i].State = "cancelled"
+		}
+	}
+	for i := range s.records {
+		if s.records[i].ID != id {
+			continue
+		}
+		switch s.records[i].State {
+		case "interrupted", "failed":
+			s.records[i].State = "cancelled"
 		}
 	}
 	s.mu.Unlock()
@@ -120,16 +157,28 @@ func (s *Service) persistJournal() {
 	if s.journalPath == "" {
 		return
 	}
+	// Serialise the snapshot with the write. Taking the snapshot under s.mu
+	// alone would let an older snapshot reach the rename last and undo a
+	// dismissal or a finished run.
+	s.journalMu.Lock()
+	defer s.journalMu.Unlock()
+
 	s.mu.Lock()
 	snapshot := dto.Journal{Entries: append([]dto.JournalEntry(nil), s.journalEntries...)}
 	s.mu.Unlock()
 
 	b, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
+		if s.log != nil {
+			s.log.Warn("journal: marshal failed", "err", err)
+		}
 		return
 	}
 	tmp := s.journalPath + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		if s.log != nil {
+			s.log.Warn("journal: write failed", "err", err)
+		}
 		return
 	}
 	if err := os.Rename(tmp, s.journalPath); err != nil && s.log != nil {
@@ -145,9 +194,6 @@ func recordFromEntry(e dto.JournalEntry) (dto.Record, bool) {
 		return dto.Record{}, false
 	}
 	state := e.State
-	if state == "interrupted" {
-		state = "failed"
-	}
 	return dto.Record{
 		ID: e.ID, Kind: e.Kind, State: state, Title: e.Title,
 		StartedAt: e.StartedAt, FinishedAt: e.FinishedAt,

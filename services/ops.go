@@ -20,6 +20,7 @@ import (
 
 	"cloudnest/internal/apperr"
 	"cloudnest/internal/dto"
+	"cloudnest/internal/planner"
 	"cloudnest/internal/rc"
 	"cloudnest/internal/split"
 )
@@ -182,6 +183,10 @@ func (s *Service) Upload(accountID, destPath string, localPaths []string) dto.Jo
 		}
 		cancel()
 		if err != nil {
+			// The job is not registered yet, so any rclone job started above
+			// would be invisible to ActiveJobs/PauseJob/CancelJob. Stop the
+			// group rather than leave it transferring in the background.
+			s.abortBackup(c, group, job.JobIDs)
 			return dto.JobRef{Err: failFrom(err)}
 		}
 		job.JobIDs = append(job.JobIDs, jobID)
@@ -262,6 +267,9 @@ func (s *Service) Download(accountID string, remotePaths []string, localDir stri
 		if src.isDir {
 			dst = filepath.Join(dir, src.base)
 			if err := os.MkdirAll(dst, 0o755); err != nil {
+				// Jobs started for earlier sources are not registered yet;
+				// stop them so they cannot keep downloading invisibly.
+				s.abortBackup(c, group, job.JobIDs)
 				return dto.JobRef{Err: failFrom(err)}
 			}
 		}
@@ -283,6 +291,10 @@ func (s *Service) Download(accountID string, remotePaths []string, localDir stri
 		}
 		cancel()
 		if err != nil {
+			// The job is not registered yet, so any rclone job started above
+			// would be invisible to ActiveJobs/PauseJob/CancelJob. Stop the
+			// group rather than leave it transferring in the background.
+			s.abortBackup(c, group, job.JobIDs)
 			return dto.JobRef{Err: failFrom(err)}
 		}
 		job.JobIDs = append(job.JobIDs, jobID)
@@ -396,16 +408,82 @@ func (s *Service) InspectSplit(accountID, partsPath string) dto.SplitInfo {
 // ResumeJob restarts the stored spec of a paused job in its existing group.
 // This deliberately stops nothing first: the paused group's old jobs have
 // already been stopped and sync/copy skips files which are already present.
-func (s *Service) ResumeJob(id string) dto.JobRef {
+func (s *Service) ResumeJob(id string) (out dto.JobRef) {
+	// Validate and reserve under s.mu before any engine or RC call. A pause only
+	// asks rclone to stop its jobs; the split goroutine can still be winding down
+	// on the same staging directory, so starting a second one would share (and
+	// delete) the first run's files. A job which is still running must never be
+	// started twice either.
+	s.mu.Lock()
+	j := s.jobs[id]
+	if j == nil {
+		s.mu.Unlock()
+		return dto.JobRef{Err: &dto.Fail{Code: string(apperr.NotFound), Message: "job not found"}}
+	}
+	if j.State == "done" {
+		s.mu.Unlock()
+		return dto.JobRef{Err: &dto.Fail{
+			Code:    string(apperr.Unknown),
+			Message: "this backup already finished; start a new one instead",
+		}}
+	}
+	if j.State == "running" {
+		s.mu.Unlock()
+		return dto.JobRef{Err: &dto.Fail{Code: string(apperr.Unknown), Message: "job is still running"}}
+	}
+	// A Pause/Cancel landing during a resume restores the state to paused or
+	// cancelled while the network work below is still in flight. The state check
+	// above would then pass for a second click, so the in-flight marker has to
+	// refuse it independently.
+	if j.Resuming {
+		s.mu.Unlock()
+		return dto.JobRef{Err: &dto.Fail{
+			Code:    string(apperr.Unknown),
+			Message: "the job is still resuming; try again in a moment",
+		}}
+	}
+	if j.SplitRunning {
+		s.mu.Unlock()
+		return dto.JobRef{Err: &dto.Fail{
+			Code:    string(apperr.Unknown),
+			Message: "the previous run is still stopping; try again in a moment",
+		}}
+	}
+	// Taking ownership is the state flip itself: it happens in the same critical
+	// section which validated the job, so an overlapping ResumeJob sees
+	// "running" and is refused instead of starting a second set of rclone jobs
+	// whose ids would replace this attempt's. PauseJob/CancelJob overwrite the
+	// state while the network work below runs; the final critical sections only
+	// claim the job when this reservation is still intact.
+	//
+	// Resuming marks the reservation as in flight. The old, already stopped ids
+	// are still in JobIDs until this attempt installs its own, so to ActiveJobs
+	// and the scheduler the job looks like a live run whose ids are gone. They
+	// check Resuming and leave the job alone instead of recording a terminal
+	// verdict which would make this resume refuse its own result.
+	prevState := j.State
+	// PauseJob/CancelJob bump StopSeq before their job/stopgroup call. If one
+	// runs during this reservation, its stopgroup may have executed before the
+	// jobs below existed, so the commit must not silently keep them running.
+	stopSeq := j.StopSeq
+	j.State = "running"
+	j.Resuming = true
+	s.mu.Unlock()
+
+	// Any failure below releases the reservation and restores the state the job
+	// had when the resume was validated, so a job which could not be restarted
+	// does not look running. restoreResume only writes the state while the
+	// reservation is intact, so a Pause/Cancel which landed in the meantime keeps
+	// its state; the in-flight marker is cleared either way.
+	defer func() {
+		if out.Err != nil {
+			s.restoreResume(j, prevState)
+		}
+	}()
+
 	c, fail := s.client()
 	if fail != nil {
 		return dto.JobRef{Err: fail}
-	}
-	s.mu.Lock()
-	j := s.jobs[id]
-	s.mu.Unlock()
-	if j == nil {
-		return dto.JobRef{Err: &dto.Fail{Code: string(apperr.NotFound), Message: "job not found"}}
 	}
 	if len(j.Sources) == 0 || j.AccountID == "" {
 		return dto.JobRef{Err: &dto.Fail{Code: string(apperr.Unknown), Message: "job cannot be resumed"}}
@@ -416,8 +494,8 @@ func (s *Service) ResumeJob(id string) dto.JobRef {
 	}
 
 	// kind selects how one plan entry is executed: a directory goes through
-	// sync/copy, a single file through copyfile (sync/copy rejects a file as
-	// srcFs).
+	// sync/copy (sync/sync for a mirror backup), a single file through copyfile
+	// (sync/copy rejects a file as srcFs).
 	type plan struct {
 		kind      string // "sync" or "copy"
 		src, dst  string
@@ -427,6 +505,17 @@ func (s *Service) ResumeJob(id string) dto.JobRef {
 	var plans []plan
 	switch j.Kind {
 	case "backup", "upload":
+		// A backup whose large files were being uploaded as .cloudbox-part
+		// sets must not fall back to a whole-file sync: that would duplicate
+		// storage and never finish the split set. Rebuild the same plan with
+		// the part size the job actually used and restart the split pipeline.
+		if j.SplitActive {
+			opts := splitOptionsFor(j.Mode, j.PartSizeMB)
+			if !opts.Enabled || !j.FastFiles {
+				return dto.JobRef{Err: resumelessSplitFail("its split settings are missing")}
+			}
+			return s.resumeSplitBackup(c, j, fs, opts, stopSeq)
+		}
 		for _, src := range j.Sources {
 			st, err := os.Stat(src)
 			if err != nil {
@@ -444,6 +533,14 @@ func (s *Service) ResumeJob(id string) dto.JobRef {
 				dst: fs + j.DestRoot, dstRemote: base,
 			})
 		}
+	case "copy":
+		// CopyCloud does not store the source account, so there is no safe way
+		// to rebuild the request. Say so instead of the generic refusal.
+		return dto.JobRef{Err: &dto.Fail{
+			Code:    string(apperr.ProviderUnsupported),
+			Message: "this copy cannot be resumed",
+			Detail:  "Cloud-to-cloud copies are not saved with a resume plan. Start the copy again from the Files page.",
+		}}
 	case "download":
 		if strings.TrimSpace(j.DestRoot) == "" {
 			return dto.JobRef{Err: &dto.Fail{Code: string(apperr.Unknown), Message: "job cannot be resumed"}}
@@ -483,6 +580,14 @@ func (s *Service) ResumeJob(id string) dto.JobRef {
 		return dto.JobRef{Err: &dto.Fail{Code: string(apperr.Unknown), Message: "job cannot be resumed"}}
 	}
 
+	// With no split pipeline to rebuild, resume the same per-source plan the
+	// original backup used. Mirror jobs must keep sync/sync so the resumed run
+	// does not silently turn into a copy, and the stored exclude patterns must
+	// travel with every sync/copy exactly like StartBackup passes them.
+	syncKind := "sync/copy"
+	if j.Mode == "mirror" {
+		syncKind = "sync/sync"
+	}
 	transfers := s.defaultTransfers()
 	newIDs := make([]int64, 0, len(plans))
 	for _, p := range plans {
@@ -495,24 +600,47 @@ func (s *Service) ResumeJob(id string) dto.JobRef {
 				DstFs: p.dst, DstRemote: p.dstRemote, Group: j.Group,
 			})
 		} else {
-			jobID, err = c.StartSync(ctx, "sync/copy", rc.SyncIn{
+			jobID, err = c.StartSync(ctx, syncKind, rc.SyncIn{
 				SrcFs: p.src, DstFs: p.dst, Group: j.Group, Transfers: transfers,
-				Retries: s.retries(),
+				Exclude: planner.RcloneRules(j.Excludes), Retries: s.retries(),
 			})
 		}
 		cancel()
 		if err != nil {
+			// The jobs started above are not tracked yet; stop the group so
+			// they cannot keep transferring invisibly (mirrors StartBackup).
+			s.abortBackup(c, j.Group, newIDs)
 			return dto.JobRef{Err: failFrom(err)}
 		}
 		newIDs = append(newIDs, jobID)
 	}
 
 	s.mu.Lock()
+	// The network work above released the lock. Only claim the job when the
+	// reservation taken at entry is still intact: PauseJob/CancelJob write
+	// "paused"/"cancelled" while the jobs start, and must not be overwritten
+	// back into a running state which would resurrect a stopped transfer. A
+	// changed state means the user stopped the job, so stop what this attempt
+	// started and refuse. A changed StopSeq catches the window where the stop's
+	// stopgroup ran before these jobs were started but the state write has not
+	// landed yet.
+	if j.State != "running" || j.SplitRunning || j.StopSeq != stopSeq {
+		msg := "the job was paused or cancelled while it was resuming"
+		if j.SplitRunning {
+			msg = "the previous run is still stopping; try again in a moment"
+		}
+		s.mu.Unlock()
+		s.abortBackup(c, j.Group, newIDs)
+		return dto.JobRef{Err: &dto.Fail{Code: string(apperr.Unknown), Message: msg}}
+	}
 	// Replace the old, stopped job ids: ActiveJobs waits for every id in the
 	// list, and a stopped id would otherwise keep the resumed job paused or
-	// mark it failed.
+	// mark it failed. Installing the ids and clearing the in-flight marker
+	// happen in one critical section, so callers can never observe "running"
+	// with the old ids plus no marker.
 	j.JobIDs = newIDs
 	j.State = "running"
+	j.Resuming = false
 	j.StartedAt = time.Now()
 	j.TotalBytes = 0
 	j.Bytes = 0
@@ -524,6 +652,165 @@ func (s *Service) ResumeJob(id string) dto.JobRef {
 
 	first := newIDs[0]
 	return dto.JobRef{ID: j.ID, JobID: first, Group: j.Group}
+}
+
+// resumelessSplitFail is the user-facing refusal for a split backup whose
+// stored plan cannot be rebuilt. Silently syncing the large files whole would
+// duplicate storage and leave the .cloudbox-part set incomplete, so starting a
+// new backup is the only safe option.
+func resumelessSplitFail(why string) *dto.Fail {
+	return &dto.Fail{
+		Code:    string(apperr.Unknown),
+		Message: "this split backup cannot be resumed",
+		Detail:  "The large-file split plan could not be rebuilt because " + why + ". Start a new backup instead.",
+	}
+}
+
+// resumeSplitBackup restarts a paused or failed split backup in its existing
+// group. The plan is rebuilt from the stored sources with the part size the
+// job actually started with, the small files travel in the same filtered
+// sync/copy that StartBackup uses, and runSplitBackup then completes the parts
+// directories. An empty plan is refused: the job was split, so falling back to
+// a whole-file sync would duplicate storage and never finish the split set.
+func (s *Service) resumeSplitBackup(c *rc.Client, j *jobState, fs string, opts split.Options, stopSeq int) dto.JobRef {
+	plan, err := buildSplitPlan(j.Sources, j.DestRoot, opts, j.Excludes)
+	if err != nil {
+		return dto.JobRef{Err: resumelessSplitFail("the sources could not be read (" + err.Error() + ")")}
+	}
+	if len(plan.files) == 0 {
+		return dto.JobRef{Err: resumelessSplitFail("its large files are no longer available")}
+	}
+
+	// Mirror StartBackup: a folder source with large files gets one filtered
+	// small-file sync; a source without large files resumes as a normal sync
+	// or copyfile. buildSplitPlan has already stat'ed every source, so a
+	// missing source cannot leave half-started jobs behind.
+	kind := "sync/copy"
+	if j.Mode == "mirror" {
+		kind = "sync/sync"
+	}
+	transfers := s.defaultTransfers()
+	newIDs := make([]int64, 0, len(j.Sources)+1)
+	for i, src := range j.Sources {
+		sp := plan.sources[i]
+		base := filepath.Base(filepath.Clean(src))
+		if len(sp.large) > 0 {
+			if !sp.copySmall {
+				continue
+			}
+			dstFs := fs + joinRemotePath(j.DestRoot, base)
+			ctx, cancel := context.WithTimeout(context.Background(), opsTimeout)
+			smallJobID, err := startSmallFileSync(ctx, c, src, dstFs, j.Group, transfers, opts.Threshold, j.Excludes)
+			cancel()
+			if err != nil {
+				s.abortBackup(c, j.Group, newIDs)
+				return dto.JobRef{Err: failFrom(err)}
+			}
+			newIDs = append(newIDs, smallJobID)
+			continue
+		}
+
+		if !sp.isDir {
+			ctx, cancel := context.WithTimeout(context.Background(), opsTimeout)
+			copyJobID, err := c.StartCopyFile(ctx, rc.CopyFileIn{
+				SrcFs:     filepath.Dir(filepath.Clean(src)),
+				SrcRemote: base,
+				DstFs:     fs + j.DestRoot,
+				DstRemote: base,
+				Group:     j.Group,
+			})
+			cancel()
+			if err != nil {
+				s.abortBackup(c, j.Group, newIDs)
+				return dto.JobRef{Err: failFrom(err)}
+			}
+			newIDs = append(newIDs, copyJobID)
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), opsTimeout)
+		syncJobID, err := c.StartSync(ctx, kind, rc.SyncIn{
+			SrcFs: src, DstFs: fs + joinRemotePath(j.DestRoot, base), Group: j.Group,
+			Transfers: transfers, Exclude: planner.RcloneRules(j.Excludes), Retries: s.retries(),
+		})
+		cancel()
+		if err != nil {
+			s.abortBackup(c, j.Group, newIDs)
+			return dto.JobRef{Err: failFrom(err)}
+		}
+		newIDs = append(newIDs, syncJobID)
+	}
+
+	s.mu.Lock()
+	// The network work above (rebuilding the plan and starting the small-file
+	// jobs) released the lock. ResumeJob reserved the job by flipping it to
+	// "running" in the same critical section which validated it, and that is the
+	// only way this attempt can still see "running" here: a second resume is
+	// refused at entry. PauseJob/CancelJob overwrite the state with "paused" or
+	// "cancelled" during the window, so any other value means the user stopped
+	// the job. StopSeq catches the same stop before its state write lands: its
+	// stopgroup may already have run, so these ids could otherwise keep running.
+	// Stop the jobs this attempt started and refuse instead of resurrecting a
+	// cancelled backup.
+	if j.State != "running" || j.SplitRunning || j.StopSeq != stopSeq {
+		msg := "the job was paused or cancelled while it was resuming"
+		if j.SplitRunning {
+			msg = "the previous run is still stopping; try again in a moment"
+		}
+		s.mu.Unlock()
+		s.abortBackup(c, j.Group, newIDs)
+		return dto.JobRef{Err: &dto.Fail{Code: string(apperr.Unknown), Message: msg}}
+	}
+	// Replace the old, stopped ids: ActiveJobs waits for every id, and a
+	// stopped id would keep the resumed job paused or mark it failed. The
+	// pending marker keeps it from completing while parts are hashed/staged.
+	// Clearing Resuming in the same critical section which installs the new
+	// ids means ActiveJobs never sees "running" with the old ids and no
+	// in-flight marker.
+	j.JobIDs = append(newIDs, pendingSplitJobID)
+	j.State = "running"
+	j.Resuming = false
+	j.Phase = "hashing"
+	j.StartedAt = time.Now()
+	j.TotalBytes = plan.totalBytes()
+	j.Bytes = 0
+	j.Speed = 0
+	j.ETA = nil
+	j.Current = ""
+	j.Failed = 0
+	// ResumeJob already took the reservation at entry; this critical section
+	// verified it is still ours. Setting SplitRunning here means a concurrent
+	// ResumeJob cannot see a terminal-looking job and launch a second goroutine
+	// between the state flip and the pipeline start.
+	j.SplitRunning = true
+	s.mu.Unlock()
+
+	// runSplitBackup reads the concurrency and retry settings from s.store, so
+	// it is only ever started for a live Service.
+	go s.runSplitBackup(c, j, plan)
+
+	first := int64(0)
+	for _, id := range newIDs {
+		if id > 0 {
+			first = id
+			break
+		}
+	}
+	return dto.JobRef{ID: j.ID, JobID: first, Group: j.Group}
+}
+
+// restoreResume releases the ownership reservation ResumeJob took when the job
+// was validated. It restores the pre-resume state only while the reservation is
+// still in place: PauseJob/CancelJob write "paused"/"cancelled" during the
+// network work, and that newer state must win. The in-flight marker is always
+// cleared, because the resume attempt is over whether or not it succeeded.
+func (s *Service) restoreResume(j *jobState, prev string) {
+	s.mu.Lock()
+	if j.State == "running" {
+		j.State = prev
+	}
+	j.Resuming = false
+	s.mu.Unlock()
 }
 
 // ---------------------------------------------------------------- helpers

@@ -24,12 +24,19 @@ import (
 	"cloudnest/internal/engine"
 	"cloudnest/internal/files"
 	"cloudnest/internal/oauth"
+	"cloudnest/internal/planner"
 	"cloudnest/internal/platform"
 	"cloudnest/internal/rc"
 	"cloudnest/internal/settings"
 )
 
 const Version = "0.1.0"
+
+// restartTimeout bounds the restart itself plus the reconciliation which
+// follows it. It is deliberately started *after* the mounts have been detached:
+// a slow unmount has its own timeout and must not consume the budget the engine
+// process swap needs. It is a variable only so tests can shorten it.
+var restartTimeout = 30 * time.Second
 
 type jobState struct {
 	ID         string
@@ -40,19 +47,56 @@ type jobState struct {
 	StartedAt  time.Time
 	TotalBytes int64
 	Files      int
-	State      string
-	Phase      string
-	Bytes      int64
-	Speed      float64
-	ETA        *int64
-	Current    string
-	Failed     int
-	// Err holds rclone's message for a failed job so the UI can explain the
-	// failure instead of only counting it.
+	// State is the cached lifecycle state: running | paused | done | failed |
+	// cancelled | interrupted. "interrupted" means the run is over (or its
+	// rclone ids are gone) but its outcome was never recorded: rclone purges
+	// successful and failed jobs alike, so it must never be treated as a plain
+	// success ("done") nor as a proven failure ("failed").
+	State   string
+	Phase   string
+	Bytes   int64
+	Speed   float64
+	ETA     *int64
+	Current string
+	Failed  int
+	// Err holds rclone's message for a failed job, or the explanation for an
+	// interrupted one, so the UI can say more than a bare status.
 	Err       string
 	Sources   []string
 	DestRoot  string
 	AccountID string
+
+	// Split intent. A backup which started the split pipeline cannot be
+	// resumed as a whole-file sync without duplicating storage and leaving the
+	// .cloudbox-part set incomplete, so ResumeJob rebuilds the plan from these
+	// values. PartSizeMB is the part size the job actually started with, not
+	// the current setting: a later Settings change must not produce a part
+	// layout which differs from the parts already uploaded.
+	FastFiles  bool
+	Mode       string
+	Excludes   []string
+	PartSizeMB int
+	// SplitActive reports whether the split pipeline was actually in flight
+	// (a FastFiles backup may legitimately have no file large enough to split).
+	SplitActive bool
+	// SplitRunning reports whether runSplitBackup is still executing for this
+	// job. It is set when the goroutine is launched and cleared under s.mu when
+	// that goroutine exits, so callers can tell a stale cached State from a
+	// transfer which really is still in flight.
+	SplitRunning bool
+	// Resuming is set by ResumeJob for the whole reservation window: from the
+	// state flip to "running" (while JobIDs still hold the paused run's ids)
+	// until the newly started rclone ids are installed (or the resume fails).
+	// No liveness probe during that window says anything about the new run, so
+	// every decision must treat the job as in flight: never apply a terminal
+	// verdict to it and never start a duplicate scheduled backup.
+	Resuming bool
+	// StopSeq counts user stop requests (PauseJob/CancelJob), incremented under
+	// s.mu before job/stopgroup runs. ResumeJob snapshots it with the
+	// reservation and only commits while it is unchanged: a stop which began
+	// while the resume was starting new jobs may have reached rclone before
+	// those jobs existed, so its stopgroup cannot be relied on to stop them.
+	StopSeq int
 }
 
 type usageEntry struct {
@@ -82,10 +126,27 @@ type Service struct {
 	// an interrupted backup after a restart.
 	journalEntries []dto.JournalEntry
 	journalPath    string
+	// journalMu serialises the whole snapshot -> marshal -> write -> rename
+	// sequence. The s.mu snapshot alone is not enough: two writers could
+	// snapshot in order and then land out of order (or share the .tmp file),
+	// leaving an older journal which re-offers a dismissed or finished run.
+	journalMu sync.Mutex
 
 	// closing is set once the user confirms stopping an in-flight transfer, so
 	// the window close guard lets the second request through.
 	closing atomic.Bool
+
+	// restartMu serialises the whole detach -> restart -> reattach sequence.
+	// The engine serialises the process swap itself, but two overlapping
+	// restarts would otherwise interleave their mount handling and lose a
+	// drive letter.
+	restartMu sync.Mutex
+
+	// enginePort is the RC port of the rclone process the Service last saw
+	// ready. Every launch picks a new port, so a change means the engine was
+	// relaunched (including by its own supervisor) and the old job ids are
+	// gone. Guarded by mu.
+	enginePort int
 }
 
 func New(app *application.App, eng engine.Engine, store *settings.Store, rclonePath string, logger *slog.Logger) *Service {
@@ -107,6 +168,10 @@ func New(app *application.App, eng engine.Engine, store *settings.Store, rcloneP
 	}
 	s.journalPath = journalPathFor(dataDir)
 	s.loadJournal()
+	// The engine's supervisor relaunches rclone after an unexpected exit
+	// without going through RestartEngine. Reconcile there too, otherwise an
+	// upload/download/copy which was in flight stays "running" forever.
+	s.watchEngine()
 	return s
 }
 
@@ -147,12 +212,177 @@ func (s *Service) Bootstrap() dto.Bootstrap {
 func (s *Service) EngineStatus() dto.EngineStatus { return mapStatus(s.eng.Status()) }
 
 func (s *Service) RestartEngine() dto.Empty {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := s.eng.Restart(ctx); err != nil {
-		return dto.Empty{}
+	if err := s.restartEngineWithMounts(context.Background()); err != nil {
+		if s.log != nil {
+			s.log.Warn("engine restart", "err", err)
+		}
+		// The frontend has no dedicated restart control, but a failure still
+		// must not be silent: show it in History and return it to any caller.
+		s.recordRestartFailure(err)
+		return dto.Empty{Err: failFrom(err)}
 	}
 	return dto.Empty{}
+}
+
+// watchEngine subscribes to the engine's status and reconciles once a new
+// rclone process is ready. The supervisor relaunches rclone after an unexpected
+// exit, so without this nothing would terminalise the jobs owned by the old
+// process. The initial Ready is ignored (there is nothing to reconcile yet).
+func (s *Service) watchEngine() {
+	if s == nil || s.eng == nil {
+		return
+	}
+	s.eng.Subscribe(func(st engine.Status) {
+		if st.State != engine.StateReady || st.Port == 0 {
+			return
+		}
+		s.mu.Lock()
+		changed := s.enginePort != 0 && s.enginePort != st.Port
+		s.enginePort = st.Port
+		s.mu.Unlock()
+		if !changed {
+			return
+		}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), restartTimeout)
+			defer cancel()
+			s.reconcileAfterRestart(ctx)
+		}()
+	})
+}
+
+// mountSnapshot holds what is needed to mount an active mount again after the
+// engine process has been restarted.
+type mountSnapshot struct {
+	accountID  string
+	remotePath string
+	mountPoint string
+}
+
+// mountSnapshotFrom splits rclone's "remote:path" mount source into the
+// account and remote path MountCloud expects. ok is false for a source which
+// does not name a remote.
+func mountSnapshotFrom(m dto.MountInfo) (mountSnapshot, bool) {
+	fs := strings.TrimSpace(m.Fs)
+	i := strings.Index(fs, ":")
+	if i <= 0 || strings.TrimSpace(m.MountPoint) == "" {
+		return mountSnapshot{}, false
+	}
+	return mountSnapshot{
+		accountID:  fs[:i],
+		remotePath: strings.Trim(strings.TrimSpace(fs[i+1:]), "/"),
+		mountPoint: m.MountPoint,
+	}, true
+}
+
+// detachMounts unmounts every mount hosted by the engine and returns the
+// mounts which are now detached. rclone hosts the mount inside its own process,
+// so stopping rclone without this leaves a drive letter pointing at nothing.
+// An error means at least one mount is still attached and the engine must not
+// be restarted, otherwise that drive would be stranded.
+func (s *Service) detachMounts() ([]mountSnapshot, error) {
+	list := s.ListMounts()
+	if list.Err != nil {
+		// A listing failure only means "nothing to detach" when the engine is
+		// not running. While it is ready it may still be hosting a mount, so a
+		// restart now could strand that drive letter: abort instead.
+		if s.engineRunning() {
+			detail := list.Err.Detail
+			if detail == "" {
+				detail = list.Err.Message
+			}
+			return nil, fmt.Errorf("could not list mounts before restart: %s", detail)
+		}
+		// If the daemon is not running it cannot be hosting a mount which this
+		// restart could strand.
+		s.mountWarn("restart: mounts not listed before restart", "err", list.Err.Detail)
+		return nil, nil
+	}
+	out := make([]mountSnapshot, 0, len(list.Items))
+	var firstErr error
+	for _, m := range list.Items {
+		snap, snapOK := mountSnapshotFrom(m)
+		if res := s.UnmountCloud(m.MountPoint); res.Err != nil {
+			s.mountWarn("restart: unmount before restart failed",
+				"mountPoint", m.MountPoint, "err", res.Err.Detail)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("could not unmount %s: %s", m.MountPoint, res.Err.Message)
+			}
+			continue
+		}
+		if snapOK {
+			out = append(out, snap)
+		}
+	}
+	return out, firstErr
+}
+
+// reattachMounts restores the mounts detached for an engine restart. Failures
+// are logged; the user can mount them again from the Clouds page.
+func (s *Service) reattachMounts(mounts []mountSnapshot) {
+	for _, m := range mounts {
+		if res := s.MountCloud(m.accountID, m.remotePath, m.mountPoint); res.Err != nil {
+			s.mountWarn("restart: remount failed",
+				"mountPoint", m.mountPoint, "account", m.accountID, "path", m.remotePath,
+				"err", res.Err.Detail)
+		}
+	}
+}
+
+// restartEngineWithMounts detaches active mounts first and restores them once
+// rclone is back. Restarting with a mount still attached would stop the daemon
+// hosting it and leave the drive letter dangling.
+//
+// The whole sequence is serialised: RestartEngine and the SaveSettings
+// goroutine can both request a restart, and two interleaved sequences would
+// detach/restart/reattach on top of each other and lose a mount.
+func (s *Service) restartEngineWithMounts(ctx context.Context) error {
+	s.restartMu.Lock()
+	defer s.restartMu.Unlock()
+
+	// A caller which queued behind a slow restart must not hand the sequence an
+	// already-expired context.
+	if ctx == nil || ctx.Err() != nil {
+		ctx = context.Background()
+	}
+
+	// Detach the mounts before starting the restart clock. A slow listing or
+	// unmount has its own timeouts (up to 10 s + 30 s per mount) and must not
+	// consume the budget the engine process swap needs: running eng.Restart with
+	// an expired context kills rclone and then fails to start a replacement.
+	mounts, unmountErr := s.detachMounts()
+	if unmountErr != nil {
+		// Keeping the old process is safer than stranding the mount which is
+		// still attached; put back the mounts which were already detached.
+		s.reattachMounts(mounts)
+		return unmountErr
+	}
+
+	// The restart gets a fresh budget now that the slow detach is over.
+	runCtx, cancel := context.WithTimeout(ctx, restartTimeout)
+	defer cancel()
+	if err := s.eng.Restart(runCtx); err != nil {
+		if len(mounts) > 0 {
+			s.mountWarn("restart: engine did not come back; mounts are detached",
+				"count", len(mounts))
+		}
+		return err
+	}
+	s.reattachMounts(mounts)
+	// Jobs which were running in the old rclone process can never finish now:
+	// the new process does not know their ids. Reconcile them here so the
+	// scheduler's overlap guard is not wedged forever by a stale "running".
+	s.reconcileAfterRestart(runCtx)
+	return nil
+}
+
+// engineRunning reports whether the engine currently has a process which could
+// be hosting a mount.
+func (s *Service) engineRunning() bool {
+	if s == nil || s.eng == nil {
+		return false
+	}
+	return s.eng.Status().State == engine.StateReady
 }
 
 func (s *Service) GetSettings() dto.Settings { return s.store.Get() }
@@ -162,11 +392,18 @@ func (s *Service) SaveSettings(in dto.Settings) dto.Empty {
 
 	// Keep the scheduler's "already ran" marker unless the schedule itself
 	// changed; otherwise every settings save would trigger an extra backup.
+	// Enabled and the execution options count as part of the schedule: turning
+	// a schedule back on must not fire a catch-up run for a point that passed
+	// while it was off, and changing how it runs should likewise take effect
+	// from the next point rather than immediately.
 	prevSched := s.store.Get().Schedule
 	in.Schedule.LastRun = prevSched.LastRun
-	if in.Schedule.Time != prevSched.Time ||
+	if in.Schedule.Enabled != prevSched.Enabled ||
+		in.Schedule.Time != prevSched.Time ||
 		in.Schedule.AccountID != prevSched.AccountID ||
 		in.Schedule.DestRoot != prevSched.DestRoot ||
+		in.Schedule.Mode != prevSched.Mode ||
+		in.Schedule.FastFiles != prevSched.FastFiles ||
 		!sameStrings(in.Schedule.SourcePaths, prevSched.SourcePaths) {
 		// A schedule that was just configured must not fire immediately for a
 		// time that already passed today; the first run is the next point.
@@ -186,15 +423,22 @@ func (s *Service) SaveSettings(in dto.Settings) dto.Empty {
 	})
 	after := s.store.Get().Advanced
 	// Proxy and verbose logging live in rclone's environment, so a change can
-	// only take effect by relaunching it. Restart in the background so the
-	// settings dialog stays responsive.
+	// only take effect by relaunching it. Detach active mounts first, then
+	// restore them after the new daemon is ready. Restart in the background so
+	// the settings dialog stays responsive.
 	if after.Proxy != before.Proxy || after.Verbose != before.Verbose {
 		s.eng.ApplyRuntime(after.Verbose, after.Proxy)
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := s.eng.Restart(ctx); err != nil && s.log != nil {
-				s.log.Warn("restart after settings change", "err", err)
+			// The deadline is created inside restartEngineWithMounts, after it
+			// has the serialisation lock, so a queued restart is not born
+			// expired.
+			if err := s.restartEngineWithMounts(context.Background()); err != nil {
+				if s.log != nil {
+					s.log.Warn("restart after settings change", "err", err)
+				}
+				// SaveSettings already returned "saved"; make the failure to
+				// apply the new proxy/verbose value visible.
+				s.recordRestartFailure(err)
 			}
 		}()
 	}
@@ -744,10 +988,7 @@ func (s *Service) StartBackup(req dto.PlanRequest) dto.JobRef {
 	if len(req.SourcePaths) == 0 {
 		return dto.JobRef{Err: &dto.Fail{Code: string(apperr.NotFound), Message: "no source selected"}}
 	}
-	dest := strings.Trim(req.DestRoot, "/ ")
-	if dest == "" {
-		dest = "電腦備份"
-	}
+	dest := destRootOf(req.DestRoot)
 	kind := "sync/copy"
 	if req.Mode == "mirror" {
 		kind = "sync/sync"
@@ -759,15 +1000,22 @@ func (s *Service) StartBackup(req dto.PlanRequest) dto.JobRef {
 
 	id := fmt.Sprintf("job-%d", time.Now().UnixNano())
 	group := "gui-" + id
+	partSizeMB := s.store.Get().Backup.PartSizeMB
 	job := &jobState{
 		ID: id, Group: group, Kind: "backup", State: "running",
 		StartedAt: time.Now(), DestRoot: dest, AccountID: req.AccountID,
 		Sources: req.SourcePaths,
+		// Remember the split intent so a later resume rebuilds the same plan
+		// instead of syncing the large files whole.
+		FastFiles:  req.FastFiles,
+		Mode:       req.Mode,
+		Excludes:   append([]string(nil), req.Excludes...),
+		PartSizeMB: partSizeMB,
 	}
 
 	// Large-file acceleration is additive-only: a mirror sync would delete the
 	// remote .cloudbox-part folders because they never exist in the source.
-	splitOpts := splitOptionsFor(req.Mode, s.store.Get().Backup.PartSizeMB)
+	splitOpts := splitOptionsFor(req.Mode, partSizeMB)
 	var plan *splitBackupPlan
 	if req.FastFiles && splitOpts.Enabled {
 		p, err := buildSplitPlan(req.SourcePaths, dest, splitOpts, req.Excludes)
@@ -778,18 +1026,44 @@ func (s *Service) StartBackup(req dto.PlanRequest) dto.JobRef {
 	}
 	planActive := plan != nil && len(plan.files) > 0
 
-	for i, src := range req.SourcePaths {
+	// Stat every source before starting any rclone job. A later missing source
+	// must not leave the jobs already started by this call running without a
+	// registered job, which would make them invisible to ActiveJobs/PauseJob.
+	type backupSource struct {
+		path  string
+		base  string
+		isDir bool
+	}
+	sources := make([]backupSource, 0, len(req.SourcePaths))
+	for _, src := range req.SourcePaths {
 		st, err := os.Stat(src)
 		if err != nil {
 			return dto.JobRef{Err: failFrom(err)}
 		}
+		// A drive root has no folder name to sync into, so a mirror job would
+		// target a malformed remote path. The wizard already blocks this;
+		// refuse here too so the plan and the sync cannot diverge.
 		base := filepath.Base(filepath.Clean(src))
+		if req.Mode == "mirror" && st.IsDir() && !plainRemoteName(base) {
+			return dto.JobRef{Err: &dto.Fail{
+				Code:    "provider_unsupported",
+				Message: "mirror needs a folder, not a drive root",
+			}}
+		}
+		sources = append(sources, backupSource{
+			path:  src,
+			base:  base,
+			isDir: st.IsDir(),
+		})
+	}
+
+	for i, src := range sources {
 		dstFs := req.AccountID + ":" + dest
-		if st.IsDir() {
-			dstFs = req.AccountID + ":" + dest + "/" + base
+		if src.isDir {
+			dstFs = req.AccountID + ":" + dest + "/" + src.base
 			job.Files = 0
 		}
-		job.Title = base
+		job.Title = src.base
 
 		if planActive {
 			sp := &plan.sources[i]
@@ -799,9 +1073,10 @@ func (s *Service) StartBackup(req dto.PlanRequest) dto.JobRef {
 				// started after the job is registered.
 				if sp.copySmall {
 					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-					smallJobID, err := startSmallFileSync(ctx, c, src, dstFs, group, transfers, splitOpts.Threshold, req.Excludes)
+					smallJobID, err := startSmallFileSync(ctx, c, src.path, dstFs, group, transfers, splitOpts.Threshold, req.Excludes)
 					cancel()
 					if err != nil {
+						s.abortBackup(c, group, job.JobIDs)
 						return dto.JobRef{Err: failFrom(err)}
 					}
 					job.JobIDs = append(job.JobIDs, smallJobID)
@@ -810,21 +1085,22 @@ func (s *Service) StartBackup(req dto.PlanRequest) dto.JobRef {
 			}
 		}
 
-		if !st.IsDir() {
+		if !src.isDir {
 			// rclone's sync/copy refuses a file as srcFs ("is a file not a
 			// directory"), which used to fail every single-file backup the
 			// moment it started. copyfile moves exactly one file and keeps
 			// its name.
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			copyJobID, err := c.StartCopyFile(ctx, rc.CopyFileIn{
-				SrcFs:     filepath.Dir(src),
-				SrcRemote: base,
+				SrcFs:     filepath.Dir(src.path),
+				SrcRemote: src.base,
 				DstFs:     req.AccountID + ":" + dest,
-				DstRemote: base,
+				DstRemote: src.base,
 				Group:     group,
 			})
 			cancel()
 			if err != nil {
+				s.abortBackup(c, group, job.JobIDs)
 				return dto.JobRef{Err: failFrom(err)}
 			}
 			job.JobIDs = append(job.JobIDs, copyJobID)
@@ -833,17 +1109,24 @@ func (s *Service) StartBackup(req dto.PlanRequest) dto.JobRef {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		jobID, err := c.StartSync(ctx, kind, rc.SyncIn{
-			SrcFs: src, DstFs: dstFs, Group: group, Transfers: transfers, Exclude: req.Excludes,
+			SrcFs: src.path, DstFs: dstFs, Group: group, Transfers: transfers,
+			Exclude: planner.RcloneRules(req.Excludes),
 			Retries: s.retries(),
 		})
 		cancel()
 		if err != nil {
+			s.abortBackup(c, group, job.JobIDs)
 			return dto.JobRef{Err: failFrom(err)}
 		}
 		job.JobIDs = append(job.JobIDs, jobID)
 	}
 
 	if planActive {
+		job.SplitActive = true
+		// runSplitBackup is launched below; mark the liveness flag before the
+		// job becomes visible so a scheduler overlap check cannot mistake the
+		// hashing/staging phase (no real RC job yet) for a finished backup.
+		job.SplitRunning = true
 		job.Phase = "hashing"
 		job.TotalBytes = plan.totalBytes()
 		// See pendingSplitJobID: keeps ActiveJobs from completing the job while
@@ -875,6 +1158,20 @@ func (s *Service) StartBackup(req dto.PlanRequest) dto.JobRef {
 	return dto.JobRef{ID: id, JobID: first, Group: group}
 }
 
+// abortBackup stops the rclone jobs already started for a backup which cannot
+// finish starting. Such a job is not in s.jobs yet, so ActiveJobs, PauseJob and
+// CancelJob cannot see or stop it; leaving it running would be invisible.
+func (s *Service) abortBackup(c *rc.Client, group string, jobIDs []int64) {
+	if len(jobIDs) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := c.JobStopGroup(ctx, group); err != nil && s.log != nil {
+		s.log.Warn("backup: stop orphaned jobs failed", "group", group, "err", err)
+	}
+}
+
 func (s *Service) ActiveJobs() dto.JobProgressList {
 	c, fail := s.client()
 	if fail != nil {
@@ -891,13 +1188,73 @@ func (s *Service) ActiveJobs() dto.JobProgressList {
 	s.mu.Unlock()
 
 	out := make([]dto.JobProgress, 0, len(active))
+	epoch := s.engineEpoch()
 	for _, j := range active {
-		if j.State == "done" || j.State == "cancelled" || j.State == "failed" {
+		// Lock discipline: core/stats and job/status are network calls which
+		// can block for seconds, so they must run without s.mu. Everything
+		// they need is copied out in one short critical section; the updates
+		// and the progress entry are then applied in a second short critical
+		// section. The split goroutine mutates the same jobState fields under
+		// s.mu, so no job field may be read or written outside a critical
+		// section.
+		s.mu.Lock()
+		group, kind, phase, state := j.Group, j.Kind, j.Phase, j.State
+		ids := append([]int64(nil), j.JobIDs...)
+		startedAt, splitRunning, resuming := j.StartedAt, j.SplitRunning, j.Resuming
+		s.mu.Unlock()
+		if state == "done" || state == "cancelled" || state == "failed" || state == "interrupted" {
 			continue
 		}
-		if stats, err := c.Stats(ctx, j.Group); err == nil && stats != nil && j.Phase != "verifying" && j.Phase != "merging" {
+
+		var stats *rc.Stats
+		if phase != "verifying" && phase != "merging" {
+			if st, err := c.Stats(ctx, group); err == nil && st != nil {
+				stats = st
+			}
+		}
+
+		finished := true
+		success := true
+		unobserved := false
+		jobErr := ""
+		if kind != "restore" {
+			// A split job is owned by its goroutine, which records the real
+			// outcome; ActiveJobs must not terminalise it while it hashes or
+			// stages (its only id is the pending marker until parts start).
+			// A job which ResumeJob is reserving is likewise in flight: its ids
+			// still belong to the stopped run being replaced, so any probe answer
+			// would be about the wrong run.
+			if splitRunning || resuming {
+				finished = false
+			} else {
+				// rclone purges finished jobs after about a minute, and it purges
+				// successful and failed ones alike. An id which is unknown to the
+				// engine therefore only proves the run ended, not that it
+				// succeeded, so it is recorded as "interrupted" rather than done.
+				// A probe which could not answer at all keeps it running.
+				verdict, msg := probeJobLiveness(c, ctx, group, ids, startedAt, epoch, resuming)
+				switch verdict {
+				case verdictLive, verdictUnknown:
+					finished = false
+				case verdictFailed:
+					success = false
+					jobErr = msg
+				case verdictUnobserved:
+					unobserved = true
+					jobErr = msg
+				}
+			}
+		}
+
+		s.mu.Lock()
+		applied := false
+		if stats != nil {
 			j.Bytes = stats.Bytes
-			if stats.TotalBytes > 0 {
+			// Split backups know their plan total up front. rclone's own
+			// totalBytes only counts transfers that have started, and the new
+			// split pipeline starts parts a few at a time, so letting it win
+			// would make the progress ring jump backwards as more parts start.
+			if j.TotalBytes <= 0 && stats.TotalBytes > 0 {
 				j.TotalBytes = stats.TotalBytes
 			}
 			j.Speed = stats.Speed
@@ -905,53 +1262,74 @@ func (s *Service) ActiveJobs() dto.JobProgressList {
 				eta := int64(*stats.ETA)
 				j.ETA = &eta
 			}
-			if len(stats.Transferring) > 0 {
-				j.Current = stats.Transferring[0].Name
+			if label := transferringLabel(stats.Transferring); label != "" {
+				j.Current = label
 			}
 			j.Failed = int(stats.Errors)
 		}
-		finished := true
-		success := true
-		jobErr := ""
-		if j.Kind != "restore" {
-			for _, id := range j.JobIDs {
-				js, err := c.JobStatus(ctx, id)
-				if err != nil {
-					finished = false
-					break
-				}
-				if !js.Finished {
-					finished = false
-					break
-				}
-				if !js.Success {
-					success = false
-					if jobErr == "" {
-						jobErr = js.Error
-					}
-				}
-			}
-			if finished {
+		// Only apply the terminal state when the job is still the run which was
+		// snapshotted above. PauseJob/CancelJob, a split goroutine which started
+		// meanwhile, a resume which took its reservation, or a resume which
+		// replaced the ids may have written a newer state during the network
+		// calls; that state must win, and no History record may be written from
+		// here.
+		if kind != "restore" && finished && state == "running" &&
+			j.State == "running" && !j.SplitRunning && !j.Resuming &&
+			sameJobIDs(j.JobIDs, ids) {
+			switch {
+			case unobserved:
+				j.State = "interrupted"
+				j.Err = jobErr
+			case !success:
+				j.State = "failed"
+				j.Err = jobErr
+			default:
 				j.State = "done"
-				if !success {
-					j.State = "failed"
-					j.Err = jobErr
-				}
-				s.finishJob(j)
 			}
+			applied = true
 		}
 		if j.State == "paused" {
 			j.Speed = 0
 		}
-		out = append(out, dto.JobProgress{
+		progress := dto.JobProgress{
 			ID: j.ID, Kind: j.Kind, State: j.State, Title: j.Title,
 			Current: j.Current, Bytes: j.Bytes, TotalBytes: j.TotalBytes,
 			Speed: j.Speed, ETA: j.ETA, TotalFiles: j.Files, Failed: j.Failed,
 			Phase: j.Phase, Error: j.Err,
-		})
+		}
+		s.mu.Unlock()
+
+		// Persisting the history record takes s.mu again, so it runs after the
+		// critical section above. A transition that lost the race records
+		// nothing.
+		if applied {
+			s.finishJob(j)
+		}
+		out = append(out, progress)
 	}
 	sort.Slice(out, func(i, k int) bool { return out[i].ID < out[k].ID })
 	return dto.JobProgressList{Items: out}
+}
+
+// transferringLabel summarises what is moving right now. Several transfers can
+// run at once (parallel split parts, or the user's "files at once" setting), so
+// the remaining names are collapsed into a count instead of implying that only
+// one file is in flight.
+func transferringLabel(items []rc.Transferring) string {
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Name != "" {
+			names = append(names, item.Name)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names)
+	if len(names) == 1 {
+		return names[0]
+	}
+	return fmt.Sprintf("%s +%d", names[0], len(names)-1)
 }
 
 func (s *Service) PauseJob(id string) dto.Empty {
@@ -961,14 +1339,24 @@ func (s *Service) PauseJob(id string) dto.Empty {
 	}
 	s.mu.Lock()
 	j := s.jobs[id]
-	s.mu.Unlock()
 	if j == nil {
+		s.mu.Unlock()
 		return dto.Empty{}
 	}
+	// Record the stop intent before asking rclone. ResumeJob reserves the job by
+	// taking this snapshot, so a resume which is still starting new jobs will
+	// see the change and stop them instead of committing underneath this stop.
+	j.StopSeq++
+	group := j.Group
+	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	_ = c.JobStopGroup(ctx, j.Group)
+	_ = c.JobStopGroup(ctx, group)
+	// The rclone call runs without s.mu; only the shared state write is locked
+	// so ActiveJobs and the scheduler's overlap guard see a consistent state.
+	s.mu.Lock()
 	j.State = "paused"
+	s.mu.Unlock()
 	return dto.Empty{}
 }
 
@@ -979,14 +1367,22 @@ func (s *Service) CancelJob(id string) dto.Empty {
 	}
 	s.mu.Lock()
 	j := s.jobs[id]
-	s.mu.Unlock()
 	if j == nil {
+		s.mu.Unlock()
 		return dto.Empty{}
 	}
+	// See PauseJob: bump the stop sequence before rclone stops the group so a
+	// resume which started jobs after that snapshot aborts instead of
+	// committing a transfer this cancel can no longer see.
+	j.StopSeq++
+	group := j.Group
+	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	_ = c.JobStopGroup(ctx, j.Group)
+	_ = c.JobStopGroup(ctx, group)
+	s.mu.Lock()
 	j.State = "cancelled"
+	s.mu.Unlock()
 	s.finishJob(j)
 	return dto.Empty{}
 }
@@ -1006,12 +1402,6 @@ func (s *Service) History(limit int) dto.RecordList {
 
 func (s *Service) finishJob(j *jobState) {
 	s.mu.Lock()
-	for _, rec := range s.records {
-		if rec.ID == j.ID {
-			s.mu.Unlock()
-			return
-		}
-	}
 	state := j.State
 	if state == "running" {
 		state = "done"
@@ -1021,13 +1411,262 @@ func (s *Service) finishJob(j *jobState) {
 		StartedAt: j.StartedAt.Unix(), FinishedAt: time.Now().Unix(),
 		Bytes: j.Bytes, Files: j.Files, Failed: j.Failed, Error: j.Err,
 	}
-	s.records = append([]dto.Record{rec}, s.records...)
+	// A retried job reuses its id (ResumeJob resumes the same spec), so the
+	// previous attempt's record must be replaced by this attempt's outcome, not
+	// treated as a duplicate to drop. Keeping one row per job also keeps
+	// Activity and the journal in agreement; the newest outcome moves to the
+	// top like any other finished run.
+	kept := make([]dto.Record, 0, len(s.records))
+	for _, old := range s.records {
+		if old.ID == j.ID {
+			continue
+		}
+		kept = append(kept, old)
+	}
+	s.records = append([]dto.Record{rec}, kept...)
 	if len(s.records) > 50 {
 		s.records = s.records[:50]
 	}
 	s.mu.Unlock()
 	// Persisted outside the lock: journalFinish takes it again.
 	s.journalFinish(rec)
+}
+
+// markJobTerminal applies a terminal state to the job run the caller observed.
+// It reports whether the transition was applied; a concurrent pause/cancel, or
+// a resume which replaced the rclone ids, wins and leaves the state alone.
+// finishJob runs after the lock is released because it takes s.mu itself.
+func (s *Service) markJobTerminal(id, state, errMsg string, expectedIDs []int64) bool {
+	s.mu.Lock()
+	j := s.jobs[id]
+	if j == nil || j.State != "running" || j.SplitRunning || j.Resuming || !sameJobIDs(j.JobIDs, expectedIDs) {
+		s.mu.Unlock()
+		return false
+	}
+	j.State = state
+	if (state == "failed" || state == "interrupted") && errMsg != "" {
+		j.Err = errMsg
+	}
+	s.mu.Unlock()
+	s.finishJob(j)
+	return true
+}
+
+func sameJobIDs(a, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// reconcileAfterRestart terminalises jobs which were running in the old rclone
+// process. The new process knows none of their ids, so those transfers can
+// never finish, and leaving them "running" would wedge the scheduler's overlap
+// guard and the window-close check. Every non-goroutine-owned kind is covered,
+// but the engine epoch distinguishes old jobs from ones started against the new
+// process so a fresh transfer is never failed by a restart.
+func (s *Service) reconcileAfterRestart(ctx context.Context) {
+	c, fail := s.client()
+	if fail != nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	epoch := s.engineEpoch()
+	type staleJob struct {
+		id        string
+		group     string
+		ids       []int64
+		startedAt time.Time
+	}
+	s.mu.Lock()
+	var jobs []staleJob
+	for _, j := range s.jobs {
+		// Split and restore jobs are owned by their goroutine, which records
+		// its own outcome, and a job which ResumeJob is reserving still carries
+		// the stopped run's ids, so they are left alone.
+		if j.State != "running" || j.SplitRunning || j.SplitActive || j.Resuming || j.Kind == "restore" {
+			continue
+		}
+		jobs = append(jobs, staleJob{
+			id: j.ID, group: j.Group,
+			ids: append([]int64(nil), j.JobIDs...), startedAt: j.StartedAt,
+		})
+	}
+	s.mu.Unlock()
+
+	for _, j := range jobs {
+		verdict, msg := probeJobLiveness(c, ctx, j.group, j.ids, j.startedAt, epoch, false)
+		switch verdict {
+		case verdictLive, verdictUnknown:
+			// Still running, or the engine could not answer. Do not fail it
+			// from a single ambiguous probe.
+			continue
+		case verdictFailed:
+			s.markJobTerminal(j.id, "failed", msg, j.ids)
+		case verdictUnobserved:
+			// The ids are gone, which proves the run ended but not how. A job
+			// from an earlier engine may well have completed before the restart,
+			// so it is recorded as interrupted (still retryable), never failed.
+			s.markJobTerminal(j.id, "interrupted", msg, j.ids)
+		default:
+			// Definitive success reported by job/status.
+			s.markJobTerminal(j.id, "done", "", j.ids)
+		}
+	}
+}
+
+// engineEpoch returns the time the current rclone process became ready. A job
+// whose StartedAt is before it was started against an earlier process, so ids
+// which the engine no longer knows were lost by a restart rather than expired
+// after finishing. The zero value means the epoch is unknown (engine not ready
+// or a test double without status); callers must then assume the same engine
+// and never fail a job because an id is missing.
+func (s *Service) engineEpoch() time.Time {
+	if s == nil || s.eng == nil {
+		return time.Time{}
+	}
+	st := s.eng.Status()
+	if st.State != engine.StateReady || st.Since.IsZero() {
+		return time.Time{}
+	}
+	return st.Since
+}
+
+// jobVerdict is the outcome of probing the rclone jobs behind one GUI job.
+type jobVerdict int
+
+const (
+	// verdictFinished means every rclone job reported a successful finish.
+	verdictFinished jobVerdict = iota
+	// verdictLive means at least one rclone job is still running.
+	verdictLive
+	// verdictUnknown means at least one probe could not answer (timeout,
+	// transport error). Liveness is unknown and must be treated as busy.
+	verdictUnknown
+	// verdictFailed means rclone definitively reported a failed job.
+	verdictFailed
+	// verdictUnobserved means the run ended but its outcome was not recorded:
+	// every id is unknown to the engine (purged after finishing, recycled, or
+	// lost with an earlier engine process). rclone purges successful and failed
+	// jobs alike, so this is neither success nor a proven failure.
+	verdictUnobserved
+)
+
+// probeJobLiveness classifies the rclone jobs behind one GUI job without ever
+// turning an ambiguous answer into success or failure. A live or unanswerable
+// probe wins over an expired id, so a timeout can never let a second transfer
+// start. resuming short-circuits the whole probe: while ResumeJob has reserved
+// the job its ids still belong to the stopped run being replaced, so the answer
+// says nothing about the run in progress.
+func probeJobLiveness(c *rc.Client, ctx context.Context, group string, ids []int64, startedAt, epoch time.Time, resuming bool) (jobVerdict, string) {
+	if resuming {
+		return verdictLive, ""
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	real := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id > 0 {
+			real = append(real, id)
+		}
+	}
+	sameEngine := epoch.IsZero() || startedAt.IsZero() || !startedAt.Before(epoch)
+	if len(real) == 0 {
+		// No rclone job was ever recorded. That is not evidence of success.
+		if sameEngine {
+			return verdictUnobserved, "rclone no longer reports this job; its outcome was not recorded"
+		}
+		return verdictUnobserved, "rclone restarted before this job's result was recorded; it may have completed"
+	}
+
+	live, unknown, gone, failed := false, false, false, false
+	errMsg := ""
+	for _, id := range real {
+		qctx, cancel := context.WithTimeout(ctx, schedulerProbeTimeout)
+		st, err := c.JobStatus(qctx, id)
+		cancel()
+		if err != nil {
+			if rc.IsNotFound(err) {
+				// rclone no longer knows this id. It purges finished jobs
+				// whether they succeeded or failed, so this only proves the run
+				// ended; the outcome is classified below.
+				gone = true
+				continue
+			}
+			// Timeout or a transport/internal error says nothing about
+			// liveness; never treat it as gone.
+			unknown = true
+			continue
+		}
+		if st.Group != "" && group != "" && st.Group != group {
+			// The numeric id was recycled by a newer job; the original is gone.
+			gone = true
+			continue
+		}
+		if !st.Finished {
+			live = true
+			continue
+		}
+		if !st.Success {
+			failed = true
+			if errMsg == "" {
+				errMsg = st.Error
+			}
+		}
+	}
+
+	switch {
+	case live:
+		return verdictLive, ""
+	case unknown:
+		return verdictUnknown, ""
+	case failed:
+		if errMsg == "" {
+			errMsg = "job did not finish"
+		}
+		return verdictFailed, errMsg
+	case gone && !sameEngine:
+		return verdictUnobserved, "rclone restarted before this job's result was recorded; it may have completed"
+	case gone:
+		// Same engine, id purged. rclone expires both successful and failed
+		// jobs, so the outcome was simply not observed.
+		return verdictUnobserved, "rclone no longer reports this job; its outcome was not recorded"
+	default:
+		return verdictFinished, ""
+	}
+}
+
+// recordRestartFailure writes a visible History entry when an engine restart
+// could not complete. Settings such as the proxy or verbose logging only take
+// effect after a restart, so a silent failure would leave a saved value
+// inactive with no indication. The app event lets a future frontend toast it.
+func (s *Service) recordRestartFailure(err error) {
+	if err == nil {
+		return
+	}
+	msg := err.Error()
+	rec := dto.Record{
+		ID:   fmt.Sprintf("restart-%d", time.Now().UnixNano()),
+		Kind: "settings", State: "failed", Title: "Engine restart",
+		StartedAt: time.Now().Unix(), FinishedAt: time.Now().Unix(), Error: msg,
+	}
+	s.mu.Lock()
+	s.records = append([]dto.Record{rec}, s.records...)
+	if len(s.records) > 50 {
+		s.records = s.records[:50]
+	}
+	s.mu.Unlock()
+	if s.app != nil {
+		s.app.Event.Emit("cloudnest:restart-failed", map[string]any{"message": msg})
+	}
 }
 
 // ---------------------------------------------------------------- helpers

@@ -4,19 +4,22 @@ package services
 // mount/listmounts through the RC API; on Windows a mount is a drive letter
 // backed by the WinFsp filesystem driver.
 //
-// MountCloud and UnmountCloud return dto.Empty, which carries no Err field in
-// this tree. Failures are therefore mapped with failFrom and written to the
-// application log so they still explain what went wrong.
+// MountCloud and UnmountCloud return dto.Empty, whose Err field carries the
+// failure to the UI; every failure is also written to the application log so
+// the reason is still available after the toast is gone.
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"cloudnest/internal/apperr"
 	"cloudnest/internal/dto"
 	"cloudnest/internal/platform"
+	"cloudnest/internal/rc"
 )
 
 const (
@@ -25,6 +28,12 @@ const (
 	mountTimeout = 30 * time.Second
 	// mountListTimeout bounds mount/listmounts, which only reads local state.
 	mountListTimeout = 10 * time.Second
+	// mountVerifyTimeout bounds how long MountCloud waits for the new mount to
+	// appear in mount/listmounts. mount/mount can return successfully before
+	// WinFsp has attached the drive, so a successful reply alone is not proof.
+	mountVerifyTimeout = 10 * time.Second
+	// mountVerifyInterval is the pause between mount/listmounts polls.
+	mountVerifyInterval = 250 * time.Millisecond
 )
 
 // MountCloud mounts one remote path as a Windows drive letter. driveLetter
@@ -37,12 +46,11 @@ func (s *Service) MountCloud(accountID, remotePath, driveLetter string) dto.Empt
 	}
 
 	if !platform.WinFspInstalled() {
-		s.mountFail("mount: WinFsp is not installed", &dto.Fail{
+		return s.mountFail("mount: WinFsp is not installed", &dto.Fail{
 			Code:    string(apperr.Unknown),
 			Message: "WinFsp is required to mount drives",
 			Detail:  "Install WinFsp from https://winfsp.dev, then restart Cloudnest and try again.",
 		})
-		return dto.Empty{}
 	}
 
 	c, fail := s.client()
@@ -60,12 +68,11 @@ func (s *Service) MountCloud(accountID, remotePath, driveLetter string) dto.Empt
 	}
 
 	if driveInUse(letter) {
-		s.mountFail("mount: drive letter is already in use", &dto.Fail{
+		return s.mountFail("mount: drive letter is already in use", &dto.Fail{
 			Code:    string(apperr.Unknown),
 			Message: "drive letter " + letter + " is already in use",
 			Detail:  "Choose another drive letter. FreeDriveLetters lists the ones which are available.",
 		})
-		return dto.Empty{}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), mountTimeout)
@@ -73,10 +80,94 @@ func (s *Service) MountCloud(accountID, remotePath, driveLetter string) dto.Empt
 	if err := c.Mount(ctx, fs+remote, letter); err != nil {
 		return s.mountFail("mount: rclone mount failed", failFrom(err))
 	}
+	// rclone can accept mount/mount and still fail to attach the drive letter
+	// (for example when WinFsp is installed but its service is not running).
+	// Only report success once the mount is actually listed.
+	if err := s.verifyMount(c, letter); err != nil {
+		return s.mountFail("mount: mount did not become active", &dto.Fail{
+			Code:    string(apperr.Unknown),
+			Message: "drive " + letter + " was not mounted",
+			Detail: "rclone accepted the mount request, but " + letter +
+				" did not become available: " + err.Error() +
+				". Check that WinFsp is installed and running and that the drive letter is free.",
+			Retry: true,
+		})
+	}
 	if s != nil && s.log != nil {
 		s.log.Info("mount: mounted", "account", accountID, "path", remote, "mountPoint", letter)
 	}
 	return dto.Empty{}
+}
+
+// verifyMount polls mount/listmounts until mountPoint is listed or the bounded
+// verification timeout expires. The mount daemon is the only authoritative
+// source: the mount/mount reply does not guarantee that the drive is usable.
+func (s *Service) verifyMount(c *rc.Client, mountPoint string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), mountVerifyTimeout)
+	defer cancel()
+	return waitForMount(ctx, mountPoint, mountVerifyTimeout, mountVerifyInterval,
+		func(ctx context.Context) (bool, error) {
+			mounts, err := c.ListMounts(ctx)
+			if err != nil {
+				return false, err
+			}
+			for _, m := range mounts {
+				if sameMountPoint(m.MountPoint, mountPoint) {
+					return true, nil
+				}
+			}
+			return false, nil
+		})
+}
+
+// waitForMount calls visible until it reports the mount point or the timeout
+// expires, whichever comes first. The last listing error, if any, is kept so
+// the returned error explains why the mount could not be confirmed.
+func waitForMount(ctx context.Context, mountPoint string, timeout, interval time.Duration,
+	visible func(context.Context) (bool, error)) error {
+	deadline := time.Now().Add(timeout)
+	timeoutErr := func(lastErr error) error {
+		if lastErr != nil {
+			return fmt.Errorf("%s did not appear within %s: %w", mountPoint, timeout, lastErr)
+		}
+		return fmt.Errorf("%s did not appear within %s", mountPoint, timeout)
+	}
+	var lastErr error
+	for {
+		ok, err := visible(ctx)
+		if ok {
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		}
+		if !time.Now().Before(deadline) {
+			return timeoutErr(lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			if lastErr == nil {
+				lastErr = ctx.Err()
+			}
+			return timeoutErr(lastErr)
+		case <-time.After(interval):
+		}
+	}
+}
+
+// sameMountPoint compares a listed mount point with the requested one. Drive
+// letters are compared in their canonical "X:" form because rclone may echo
+// back "X", "x:" or "X:\"; other mount points are compared as cleaned paths.
+func sameMountPoint(listed, want string) bool {
+	trim := func(s string) string {
+		return strings.TrimRight(strings.TrimSpace(s), `\/`)
+	}
+	la, lok := normalizeDriveLetter(trim(listed))
+	wa, wok := normalizeDriveLetter(trim(want))
+	if lok && wok {
+		return la == wa
+	}
+	return strings.EqualFold(filepath.Clean(listed), filepath.Clean(want))
 }
 
 // UnmountCloud removes one active mount. A bare drive letter is normalised the
